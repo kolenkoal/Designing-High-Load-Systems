@@ -46,7 +46,7 @@ $$\frac{490 \text{ млн бронирований/год}}{150 \text{ млн MA
 | special_requests       | пожелания гостя, произвольный текст (в среднем ~80 символов)                                                         | text         | 80   |
 | **Итого (поля)**       |                                                                                                                      |              | **166** |
 
-Сырых данных: 166 байт. Индексы по полям `user_id` и `listing_id` (тип B-tree, ~50 байт каждый) добавляют ещё 100 байт. С учётом служебного заголовка строки PostgreSQL (~23 байта [[3]](https://www.postgresql.org/docs/current/storage-page-layout.html#STORAGE-TUPLE-LAYOUT)): 166 + 100 + 23 ≈ **~300 байт**.
+Сырых данных: 166 байт. Индексы по полям `user_id` и `listing_id` (тип B-tree, ~50 байт каждый) добавляют ещё 100 байт. С учётом служебного заголовка строки PostgreSQL (~24 байта [[3]](https://www.postgresql.org/docs/current/storage-page-layout.html#STORAGE-TUPLE-LAYOUT)): 166 + 100 + 24 ≈ **~300 байт**.
 
 Оценки размеров остальных сущностей:
 
