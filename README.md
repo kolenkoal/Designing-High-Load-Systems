@@ -333,8 +333,8 @@ flowchart LR
 U[Пользователь] --> DNS[DNS]
 DNS --> EDGE[CDN/WAF]
 EDGE --> IN[Входной L7 балансировщик в ДЦ]
-IN --> API[API сервисы (несколько реплик)]
-IN --> WEB[WEB сервисы (несколько реплик)]
+IN --> API["API сервисы (несколько реплик)"]
+IN --> WEB["WEB сервисы (несколько реплик)"]
 ```
 
 ## 4.2 Схемы балансировки для межсервисных запросов
@@ -354,10 +354,10 @@ IN --> WEB[WEB сервисы (несколько реплик)]
 ```mermaid
 flowchart LR
 A[Service A] --> SD[Service discovery / DNS]
-SD --> B[Service B (VIP/имя сервиса)]
-B --> B1[Instance 1]
-B --> B2[Instance 2]
-B --> B3[Instance 3]
+SD --> B["Service B (VIP/имя сервиса)"]
+B --> B1["Instance 1"]
+B --> B2["Instance 2"]
+B --> B3["Instance 3"]
 ```
 
 ## 4.3 Схема отказоустойчивости
