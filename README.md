@@ -430,33 +430,21 @@ $$N_{work} = \left\lceil \frac{5}{4} \right\rceil = 2, \quad N_{total} = 2 + 1 =
 
 ## 5.1 Проверка полноты данных для API
 
-В данном разделе проверяется, что логическая модель данных покрывает весь функционал MVP сервиса. Для каждого продуктового сценария указаны сущности данных, которые используются API для выполнения операции.
+| Функционал MVP | Сущности модели данных |
+|---|---|
+| **Поиск жилья** | `listing_search`, `availability_day` |
+| **Карточка объявления** | `listings`, `listing_photos`, `reviews`, `users` |
+| **Календарь доступности** | `availability_day`, `listings` |
+| **Бронирование** | `users`, `listings`, `availability_day`, `bookings` |
+| **Онлайн-платёж** | `payments`, `bookings`, `users` |
+| **Личный кабинет гостя** | `users`, `bookings`, `payments`, `reviews`, `saved_listings` |
+| **Личный кабинет хозяина** | `users`, `listings`, `bookings`, `reviews` |
+| **Отзывы и рейтинги** | `reviews`, `bookings`, `listings`, `users` |
 
-| Функционал MVP                                                        | Сущности модели данных                                                    |
-| --------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| **Поиск жилья** (по локации, датам, числу гостей и фильтрам)          | `listings`, `availability_day`, `listing_amenities`, `listing_photos`, `reviews` |
-| **Каталог объявлений** (карточка объекта: фото, описание, отзывы)     | `listings`, `listing_photos`, `media_objects`, `reviews`, `users`                |
-| **Календарь доступности** (отображение занятых и свободных дат)       | `availability_day`, `bookings`, `listings`                                       |
-| **Бронирование жилья** (проверка пересечений и создание брони)        | `users`, `listings`, `availability_day`, `bookings`                              |
-| **Онлайн-платёж** (создание и обработка транзакции)                   | `payments`, `bookings`, `users`                                                  |
-| **Личный кабинет пользователя** (история поездок)                     | `users`, `bookings`, `payments`, `reviews`, `saved_listings`                     |
-| **Личный кабинет хозяина** (управление объявлениями и бронированиями) | `users`, `listings`, `bookings`, `reviews`                                       |
-| **Отзывы и рейтинги**                                                 | `reviews`, `bookings`, `listings`, `users`                                       |
-
-Ключевой пользовательский сценарий сервиса — бронирование жилья — использует следующий набор сущностей:
-
+Ключевой путь бронирования:
 ```
 users → listings → availability_day → bookings → payments
 ```
-
-Этот набор данных обеспечивает:
-
-* проверку доступности жилья на выбранные даты;
-* создание записи бронирования;
-* проведение платежа;
-* последующую возможность оставить отзыв.
-
-Таким образом, логическая модель данных покрывает весь функционал MVP сервиса краткосрочной аренды жилья.
 
 ## 5.2 Логическая схема сущностей
 
@@ -482,6 +470,8 @@ erDiagram
 
     MEDIA_OBJECTS ||--o{ LISTING_PHOTOS : stores
     MEDIA_OBJECTS ||--o{ USERS : avatar
+
+    LISTING_SEARCH }o--|| LISTINGS : projection_of
 
     USERS {
         bigint user_id PK
@@ -522,6 +512,20 @@ erDiagram
         string status
         timestamp created_at
         timestamp updated_at
+    }
+
+    LISTING_SEARCH {
+        bigint listing_id PK
+        string city
+        decimal lat
+        decimal lon
+        smallint guests_max
+        decimal base_price
+        float rating_avg
+        int reviews_count
+        bigint amenities_bitmap
+        bigint cover_photo_id
+        string status
     }
 
     LISTING_PHOTOS {
@@ -608,456 +612,405 @@ erDiagram
 
 ## 5.3 Описание основных таблиц
 
-В таблице ниже указаны логические сущности, средний размер строки, порядок числа строк, пиковая нагрузка на чтение/запись и требования к консистентности.
+**LPS (Lines Per Second)** — количество строк, которое база данных реально читает в секунду. Считается как:
 
-| Сущность         | Тип данных               | Размер строки | Число строк | Общий размер | Peak read QPS | Peak write QPS | Источник нагрузки          | Консистентность |
-|------------------|--------------------------|---------------|-------------|--------------|---------------|----------------|----------------------------|-----------------|
-| users            | транзакционные           | ~600 B        | 200 млн     | ~120 ГБ      | ~1734         | ~10            | профиль, авторизация       | strong          |
-| sessions         | кэш сессий               | ~200 B        | 50 млн      | ~10 ГБ       | ~1734         | ~600           | авторизация                | strong          |
-| listings         | каталог                  | ~3 КБ         | 8 млн       | ~24 ГБ       | ~13000        | ~5             | поиск, карточка            | eventual read   |
-| availability_day | календарь                | ~32 B         | 2.9 млрд    | ~93 ГБ       | ~6075         | ~150           | проверка дат, бронирование | strong          |
-| bookings         | транзакции               | ~300 B        | 3 млрд      | ~0.9 ТБ      | ~900          | ~47            | бронирование               | strong          |
-| payments         | транзакции               | ~200 B        | 3 млрд      | ~600 ГБ      | ~100          | ~100           | платёж                     | strong          |
-| reviews          | пользовательский контент | ~500 B        | 1.2 млрд    | ~600 ГБ      | ~3000         | ~17            | карточка объявления        | eventual        |
+$$LPS = RPS_{peak} \times rows\_per\_query$$
 
-### Пояснения к расчётам
+Это важнее чем просто RPS, потому что один запрос может читать десятки строк — например, поиск возвращает 20 листингов, карточка объявления — 15 фотографий.
 
-* `users`, `bookings`, `reviews` и медиа-величины согласованы с оценками из раздела 2.
-* Для `listing_photos` принято в среднем **15 фото на объявление**: `8 млн × 15 = 120 млн`.
-* Для `listing_amenities` принято в среднем **20 удобств на объявление**: `8 млн × 20 = 160 млн`.
-* Для `availability_day` принят rolling horizon **365 дней**: `8 млн × 365 ≈ 2.9 млрд строк`.
-* Для `saved_listings` сохранена логика из твоего расчёта AUS: `150 млн активных пользователей × 40 сохранённых объявлений = 6 млрд строк`.
+| Таблица | Размер строки | Число строк | Общий размер | Peak read RPS | Rows per query | **LPS (чтение)** | Peak write RPS | Консистентность |
+|---------|--------------|-------------|--------------|---------------|----------------|-----------------|----------------|----------------|
+| `users` | ~600 B | 200 млн | ~120 ГБ | 1 734 | 1 | **1 734** | ~10 | strong |
+| `sessions` | ~200 B | 50 млн | ~10 ГБ | 1 734 | 1 | **1 734** | ~600 | strong |
+| `listings` | ~3 КБ | 8 млн | ~24 ГБ | 6 075 | 1 | **6 075** | ~5 | eventual read |
+| `listing_search` | ~256 B | 8 млн | ~2 ГБ | 6 945 | 20 | **138 900** | ~5 | eventual |
+| `listing_photos` | ~200 B | 120 млн | ~24 ГБ | 6 075 | 15 | **91 125** | ~30 | eventual |
+| `availability_day` | ~32 B | 2.9 млрд | ~93 ГБ | 6 075 | 30 | **182 250** | ~150 | strong |
+| `bookings` | ~300 B | 3 млрд | ~0.9 ТБ | 900 | 1 | **900** | ~47 | strong |
+| `payments` | ~200 B | 3 млрд | ~600 ГБ | 100 | 1 | **100** | ~100 | strong |
+| `reviews` | ~500 B | 1.2 млрд | ~600 ГБ | 3 000 | 10 | **30 000** | ~17 | eventual |
+| `saved_listings` | ~50 B | 6 млрд | ~300 ГБ | 500 | 40 | **20 000** | ~50 | eventual |
 
-## 5.4 Файловые данные, кэши и буферы
+### Пояснения к rows_per_query
 
-Кроме основных таблиц, для работы API нужны файловые данные, кэши и буферы.
+| Таблица | Откуда берётся rows_per_query |
+|---------|-------------------------------|
+| `listing_search` | поисковая выдача возвращает 20 результатов на страницу |
+| `listing_photos` | в среднем 15 фото на объявление, читаются все при открытии карточки |
+| `availability_day` | проверка доступности за 30 дней (типичный горизонт поиска) |
+| `reviews` | на карточке показывается до 10 последних отзывов |
+| `saved_listings` | пользователь видит до 40 сохранённых объявлений в списке |
 
-| Набор данных                     | Назначение                                             | Ключ                                | Средний размер записи | Число записей / объектов |              Общий размер |                                 Peak read QPS |           Peak write QPS | Консистентность                            |
-|----------------------------------|--------------------------------------------------------|-------------------------------------|----------------------:|-------------------------:|--------------------------:|----------------------------------------------:|-------------------------:|--------------------------------------------|
-| Фото объявлений (object storage) | оригиналы изображений                                  | `media_object_id` / `object_key`    |               ~500 КБ |                 ~120 млн |                    ~60 ТБ | origin read низкий, основная выдача через CDN |                      ~30 | eventual                                   |
-| Превью для поиска                | уменьшенные изображения                                | `media_object_id` / `object_key`    |                ~80 КБ |                 ~120 млн |                   ~9.6 ТБ | origin read низкий, основная выдача через CDN |                      ~30 | eventual                                   |
-| Аватары пользователей            | изображения профилей                                   | `media_object_id` / `object_key`    |               ~150 КБ |                 ~150 млн |                  ~22.5 ТБ | origin read низкий, основная выдача через CDN |                      ~10 | eventual                                   |
-| CDN cache                        | кэш фотографий и статики                               | URL / object key                    |    зависит от объекта |                  hot set | зависит от TTL и hit-rate |               почти весь read-трафик по медиа | запись = прогрев/промахи | eventual                                   |
-| `session_cache`                  | быстрый доступ к активной сессии                       | `session_id`                        |                ~200 B |                  ~50 млн |                    ~10 ГБ |                                         ~1734 |                     ~600 | strong                                     |
-| `listing_card_cache`             | готовая карточка объявления                            | `listing_id`                        |                 ~4 КБ |           ~1 млн hot set |                     ~4 ГБ |                                         ~6075 | ~200 invalidation/update | eventual                                   |
-| `availability_cache`             | быстрый ответ по availability                          | `(listing_id, check_in, check_out)` |                 ~64 B |          ~10 млн hot set |                   ~640 МБ |                                         ~6075 | ~150 invalidation/update | strong на бронирование, eventual на чтение |
-| `outbox_events`                  | буфер событий после записи бронирования/платежа/отзыва | `event_id`                          |                ~150 B |         ~10 млн за сутки |                   ~1.5 ГБ |                                          ~100 |                     ~100 | at-least-once delivery                     |
+## 5.4 Анализ JOIN-ов по ключевым сценариям
+
+### Сценарий 1: Поиск жилья
+
+Запрос идёт **только в `listing_search`** — это денормализованная проекция, которая содержит всё необходимое для выдачи (цена, рейтинг, геолокация, удобства, обложка). JOIN не нужен.
+
+| Таблица | Строк на запрос | Операция |
+|---------|----------------|---------|
+| `listing_search` | 20 | seq scan по индексу `(city, status, guests_max)` |
+| **Итого** | **20 строк** | без JOIN |
+
+### Сценарий 2: Карточка объявления
+
+| Таблица | Строк на запрос | Операция |
+|---------|----------------|---------|
+| `listings` | 1 | PK lookup по `listing_id` |
+| `listing_photos` | 15 | index scan по `(listing_id, sort_order)` |
+| `reviews` | 10 | index scan по `(listing_id, created_at DESC)` |
+| `users` (хозяин) | 1 | PK lookup по `host_id` |
+| **Итого** | **27 строк** | 3 JOIN |
+
+LPS при пиковой нагрузке: 6 075 × 27 = **164 025 строк/с**
+
+### Сценарий 3: Проверка доступности дат
+
+| Таблица | Строк на запрос | Операция |
+|---------|----------------|---------|
+| `availability_day` | 30 | index scan по `(listing_id, day)` за выбранный диапазон |
+| **Итого** | **30 строк** | без JOIN |
+
+### Сценарий 4: Бронирование (запись)
+
+Транзакционная операция — читаем перед записью:
+
+| Таблица | Строк | Операция |
+|---------|-------|---------|
+| `users` | 1 | PK lookup (проверка гостя) |
+| `listings` | 1 | PK lookup (проверка объявления) |
+| `availability_day` | 30 | index scan (финальная проверка пересечений) |
+| `bookings` (запись) | 1 | INSERT |
+| `payments` (запись) | 1 | INSERT |
+| `availability_day` (запись) | 30 | UPDATE (пометить даты занятыми) |
+| **Итого чтений** | **32 строки** | 2 JOIN + транзакция |
 
 ## 5.5 Требования к консистентности
 
 ### Strong consistency
 
-Нужна для данных, где ошибка приводит к двойному бронированию или финансовой ошибке:
+Нужна там, где ошибка приводит к двойному бронированию или финансовой потере:
 
-* `bookings`
-* `payments`
-* `availability_day` для конкретной пары `(listing_id, day)`
-* `sessions`
-
-Ключевое требование: после успешного бронирования пользователь не должен увидеть старую доступность на тех же датах в рамках операции записи.
+- `bookings` — запись брони должна быть атомарной
+- `payments` — платёж не должен дублироваться, используется `idempotency_key`
+- `availability_day` — финальная проверка и обновление в одной транзакции
+- `sessions` — сессия должна читаться однозначно
 
 ### Eventual consistency
 
-Допустима там, где небольшая задержка обновления не ломает бизнес-сценарий:
+Допустима там, где задержка в несколько секунд не ломает продукт:
 
-* `listing_photos`
-* `reviews`
-* `saved_listings`
-* `listing_card_cache`
-* `CDN cache`
-* `outbox_events`
-
-Пример: новый отзыв может появиться в карточке с задержкой в несколько секунд без критического влияния на продукт.
+- `listing_search` — поисковая проекция обновляется асинхронно после изменения объявления
+- `listing_photos`, `reviews` — новый контент может появиться с задержкой
+- `saved_listings` — некритично
 
 ## 5.6 Особенности распределения нагрузки по ключам
 
-| Набор данных         | Ключ нагрузки                       | Особенность                                                                                 |
-|----------------------|-------------------------------------|---------------------------------------------------------------------------------------------|
-| `users`              | `user_id`                           | распределение близко к равномерному                                                         |
-| `sessions`           | `session_id`                        | равномерное, hot key почти отсутствует                                                      |
-| `listings`           | `listing_id`, `city`                | перекос по популярным городам и топ-объявлениям                                             |
-| `availability_day`   | `(listing_id, day)`                 | сильный hot key на популярных объявлениях и праздничных датах                               |
-| `bookings`           | `listing_id`                        | запись неравномерна: самые популярные объявления и топ-локации создают конфликтующие записи |
-| `reviews`            | `listing_id`                        | чтение смещено в сторону популярных объявлений                                              |
-| `listing_card_cache` | `listing_id`                        | hot keys у популярных карточек                                                              |
-| `availability_cache` | `(listing_id, check_in, check_out)` | hot keys у популярных городов, выходных и праздничных периодов                              |
-| `CDN cache`          | `object_key`                        | сильный перекос по популярным фотографиям на главных направлениях                           |
+| Таблица | Ключ нагрузки | Характер |
+|---------|--------------|---------|
+| `users` | `user_id` | равномерное |
+| `sessions` | `session_id` | равномерное |
+| `listings` | `listing_id`, `city` | перекос по популярным городам |
+| `listing_search` | `(city, guests_max, price)` | сильный перекос по популярным направлениям |
+| `availability_day` | `(listing_id, day)` | hot keys на популярных объявлениях и праздничных датах |
+| `bookings` | `listing_id` | конкуренция за популярные объявления |
+| `reviews` | `listing_id` | чтение смещено в популярные объявления |
+| `saved_listings` | `user_id` | равномерное по записи, hot keys по популярным `listing_id` |
 
 ### Вывод по hot keys
 
-Для Airbnb основная неравномерность идёт не по `user_id`, а по:
-
-* популярным городам;
-* конкретным объявлениям;
-* диапазонам дат в сезон и праздники.
-
-Поэтому самые чувствительные ключи в системе — это:
-
-* `listing_id`
-* `(listing_id, day)`
-* `(city, check_in, check_out, guests, filters)` для поиска
-* `object_key` для медиа
-
-Именно эти ключи формируют основную нагрузку на чтение и являются кандидатами на кэширование и отдельный контроль hot spots.
+Основная неравномерность — не по `user_id`, а по:
+- `listing_id` — популярные объявления
+- `(listing_id, day)` — доступность в сезон и праздники
+- `(city, check_in, check_out, guests)` — поисковые запросы по топ-направлениям
 
 ---
 
 # 6. Физическая схема данных
 
-## 6.1 Выбор физических хранилищ
+## 6.1 Выбор хранилищ
 
-Для MVP используются четыре типа хранилищ:
+| Хранилище | Что хранится | Почему |
+|-----------|-------------|--------|
+| **PostgreSQL 16** | `users`, `sessions`, `listings`, `listing_photos`, `media_objects`, `amenities`, `listing_amenities`, `availability_day`, `bookings`, `payments`, `reviews`, `saved_listings` | транзакционные данные, strong consistency, ACID |
+| **Elasticsearch 8** | `listing_search` | полнотекстовый поиск, фильтры по геолокации, сортировка, агрегации — PostgreSQL с GIN-индексом не справится при 138 900 LPS |
+| **Redis 7** | сессии, кэш карточек, кэш доступности | sub-millisecond latency на горячих чтениях |
+| **Kafka** | события изменения объявлений, медиа-события, аналитика | асинхронное обновление Elasticsearch, развязка OLTP и поиска |
+| **S3-совместимое объектное хранилище** | фото объявлений, превью, аватары | бинарные файлы вне PostgreSQL |
+| **CDN** | раздача медиа и статики | 94% медиатрафика — не нагружать origin |
 
-* **PostgreSQL 16** — основное транзакционное хранилище для пользователей, объявлений, календаря доступности, бронирований, платежей и отзывов;
-* **Redis 7** — хранение сессий и быстрых кэшей;
-* **S3-совместимое объектное хранилище** — фотографии объявлений, превью и аватары;
-* **CDN** — кэш и раздача медиафайлов.
+Чтобы не смешивать разные ключи шардирования, PostgreSQL разбит на два кластера:
 
-Чтобы не смешивать разные ключи шардирования в одном кластере, физическая схема разбита на два PostgreSQL-кластера:
+- **user-cluster** — шардируется по `user_id`
+- **core-cluster** — шардируется по `listing_id`
 
-1. **user-cluster** — данные, которые естественно шардируются по `user_id`;
-2. **core-cluster** — данные, которые естественно шардируются по `listing_id`.
-
-Это позволяет:
-
-* локализовать основные пользовательские запросы внутри user-cluster;
-* локализовать запросы карточки, доступности и бронирования внутри core-cluster;
-* избежать лишних cross-shard операций на самом горячем пути.
-
-## 6.2 Физическая схема хранения
+## 6.2 Физическая схема
 
 ```mermaid
 flowchart TB
     subgraph U["PostgreSQL 16 / user-cluster
-8 shards by HASH(user_id)
-each shard: primary + 2 replicas"]
+    8 shards by HASH(user_id)
+    each shard: primary + 2 replicas"]
         USERS["users
-PK(user_id)
-UNIQUE(email)
-UNIQUE(phone)
-IDX(created_at)"]
+        PK(user_id)
+        UNIQUE(email)
+        UNIQUE(phone)
+        IDX(created_at)"]
+        SESSIONS["sessions
+        PK(session_id)
+        IDX(user_id)
+        IDX(expires_at)"]
         SAVED["saved_listings
-PK(user_id, listing_id)
-IDX(listing_id, created_at DESC)"]
+        PK(user_id, listing_id)
+        IDX(listing_id, created_at DESC)"]
     end
 
     subgraph C["PostgreSQL 16 / core-cluster
-16 shards by HASH(listing_id)
-each shard: primary + 2 replicas"]
+    16 shards by HASH(listing_id)
+    each shard: primary + 2 replicas"]
         LISTINGS["listings
-PK(listing_id)
-IDX(host_id, created_at DESC)
-IDX(city, status)
-GiST(lat, lon)"]
-        SEARCH["listing_search
-DENORMALIZED
-PK(listing_id)
-IDX(city, status, guests_max)
-IDX(base_price)
-GIN(amenities_bitmap)
-GiST(lat, lon)"]
+        PK(listing_id)
+        IDX(host_id, created_at DESC)
+        IDX(city, status)
+        GiST(lat, lon)"]
         PHOTOS["listing_photos
-PK(photo_id)
-IDX(listing_id, sort_order)
-UNIQUE(listing_id, sort_order)"]
-        AMENITIES["amenities
-PK(amenity_id)"]
-        LAM["listing_amenities
-PK(listing_id, amenity_id)
-IDX(amenity_id, listing_id)"]
+        PK(photo_id)
+        IDX(listing_id, sort_order)"]
         AVAIL["availability_day
-PK(listing_id, day)
-PARTITION BY RANGE(day) monthly inside shard
-IDX(day, is_available)
-IDX(updated_at)"]
+        PK(listing_id, day)
+        PARTITION BY RANGE(day) monthly
+        IDX(day, is_available)"]
         BOOKINGS["bookings
-PK(booking_id)
-IDX(guest_id, created_at DESC)
-IDX(host_id, created_at DESC)
-IDX(listing_id, check_in)
-IDX(status, created_at DESC)"]
+        PK(booking_id)
+        IDX(guest_id, created_at DESC)
+        IDX(host_id, created_at DESC)
+        IDX(listing_id, check_in)"]
         PAY["payments
-PK(payment_id)
-UNIQUE(booking_id)
-UNIQUE(idempotency_key)
-IDX(status, created_at DESC)"]
+        PK(payment_id)
+        UNIQUE(booking_id)
+        UNIQUE(idempotency_key)"]
         REV["reviews
-PK(review_id)
-UNIQUE(booking_id)
-IDX(listing_id, created_at DESC)
-IDX(author_id, created_at DESC)"]
-        MEDIA_META["media_objects
-PK(media_object_id)
-UNIQUE(object_key)
-IDX(created_at)"]
+        PK(review_id)
+        UNIQUE(booking_id)
+        IDX(listing_id, created_at DESC)"]
+        MEDIA["media_objects
+        PK(media_object_id)
+        UNIQUE(object_key)"]
+        LAM["listing_amenities
+        PK(listing_id, amenity_id)"]
+        AM["amenities
+        PK(amenity_id)
+        reference table"]
+    end
+
+    subgraph ES["Elasticsearch 8
+    12 primary shards + 1 replica each"]
+        LSEARCH["listing_search
+        doc_id = listing_id
+        IDX: city, status, guests_max
+        IDX: base_price, rating_avg
+        IDX: lat/lon (geo_point)
+        IDX: amenities_bitmap"]
     end
 
     subgraph RS["Redis 7 / session-cluster
-3 masters + 3 replicas"]
+    3 masters + 3 replicas"]
         SESS["session:{session_id}
-TTL
-AOF everysec"]
+        TTL 30d
+        AOF everysec"]
     end
 
     subgraph RC["Redis 7 / cache-cluster
-6 masters + 6 replicas"]
-        LC["listing_card:{listing_id}"]
-        AC["availability:{listing_id}:{checkin}:{checkout}"]
+    6 masters + 6 replicas"]
+        LC["listing_card:{listing_id}
+        TTL 5m"]
+        AC["availability:{listing_id}:{checkin}:{checkout}
+        TTL 1m"]
+    end
+
+    subgraph KF["Kafka
+    3 brokers, replication factor 3"]
+        K1["listing-updates
+        partitioned by listing_id"]
+        K2["media-events
+        partitioned by listing_id"]
     end
 
     subgraph S3["S3-compatible object storage"]
         OBJ["photos / previews / avatars
-key = object_key"]
+        key = object_key"]
     end
 
-    USERS --> LISTINGS
     USERS --> BOOKINGS
     USERS --> REV
     USERS --> SAVED
-
-    LISTINGS --> SEARCH
     LISTINGS --> PHOTOS
     LISTINGS --> LAM
     LISTINGS --> AVAIL
     LISTINGS --> BOOKINGS
     LISTINGS --> REV
-
     BOOKINGS --> PAY
-    BOOKINGS --> REV
-    PHOTOS --> MEDIA_META
-    MEDIA_META --> OBJ
+    PHOTOS --> MEDIA
+    MEDIA --> OBJ
+    LISTINGS -->|"async via Kafka"| LSEARCH
+    K1 --> LSEARCH
 ```
 
-## 6.3 Денормализация
+## 6.3 Таблицы, индексы и шардирование
 
-В физической схеме используются несколько денормализованных сущностей и полей.
+| Таблица | СУБД / кластер | Размер строки | Число строк | Общий размер | Индексы | Шардирование | Репликация |
+|---------|---------------|--------------|-------------|--------------|---------|-------------|-----------|
+| `users` | PostgreSQL / user-cluster | ~600 B | 200 млн | ~120 ГБ | `PK(user_id)`, `UNIQUE(email)`, `UNIQUE(phone)`, `IDX(created_at)` | `HASH(user_id)`, 8 shards | primary + 2 replicas |
+| `sessions` | PostgreSQL / user-cluster | ~200 B | 50 млн | ~10 ГБ | `PK(session_id)`, `IDX(user_id)`, `IDX(expires_at)` | `HASH(user_id)`, 8 shards | primary + 2 replicas |
+| `saved_listings` | PostgreSQL / user-cluster | ~50 B | 6 млрд | ~300 ГБ | `PK(user_id, listing_id)`, `IDX(listing_id, created_at DESC)` | `HASH(user_id)`, 8 shards | primary + 2 replicas |
+| `listings` | PostgreSQL / core-cluster | ~3 КБ | 8 млн | ~24 ГБ | `PK(listing_id)`, `IDX(host_id, created_at DESC)`, `IDX(city, status)`, `GiST(lat, lon)` | `HASH(listing_id)`, 16 shards | primary + 2 replicas |
+| `listing_photos` | PostgreSQL / core-cluster | ~200 B | 120 млн | ~24 ГБ | `PK(photo_id)`, `IDX(listing_id, sort_order)`, `UNIQUE(listing_id, sort_order)` | `HASH(listing_id)`, 16 shards | primary + 2 replicas |
+| `amenities` | PostgreSQL / core-cluster | ~64 B | ~100 | мало | `PK(amenity_id)` | reference table на всех shards | replication to all shards |
+| `listing_amenities` | PostgreSQL / core-cluster | ~24 B | 160 млн | ~3.8 ГБ | `PK(listing_id, amenity_id)`, `IDX(amenity_id)` | `HASH(listing_id)`, 16 shards | primary + 2 replicas |
+| `availability_day` | PostgreSQL / core-cluster | ~32 B | 2.9 млрд | ~93 ГБ | `PK(listing_id, day)`, `IDX(day, is_available)`, `IDX(updated_at)` | `HASH(listing_id)`, 16 shards; внутри шарда `RANGE(day)` по месяцам | primary + **1 синхронная** replica + 1 async |
+| `bookings` | PostgreSQL / core-cluster | ~300 B | 3 млрд | ~0.9 ТБ | `PK(booking_id)`, `IDX(guest_id, created_at DESC)`, `IDX(host_id, created_at DESC)`, `IDX(listing_id, check_in)`, `IDX(status, created_at DESC)` | `HASH(listing_id)`, 16 shards | primary + **1 синхронная** replica + 1 async |
+| `payments` | PostgreSQL / core-cluster | ~200 B | 3 млрд | ~600 ГБ | `PK(payment_id)`, `UNIQUE(booking_id)`, `UNIQUE(idempotency_key)`, `IDX(status, created_at DESC)` | колоцирован с `bookings` по `listing_id`, 16 shards | primary + **1 синхронная** replica + 1 async |
+| `reviews` | PostgreSQL / core-cluster | ~500 B | 1.2 млрд | ~600 ГБ | `PK(review_id)`, `UNIQUE(booking_id)`, `IDX(listing_id, created_at DESC)`, `IDX(author_id, created_at DESC)` | `HASH(listing_id)`, 16 shards | primary + 2 async replicas |
+| `media_objects` | PostgreSQL / core-cluster | ~160 B | ~270 млн | ~43 ГБ | `PK(media_object_id)`, `UNIQUE(object_key)`, `IDX(created_at)` | `HASH(listing_id)`, 16 shards | primary + 2 replicas |
+| `listing_search` | **Elasticsearch 8** | ~256 B | 8 млн | ~2 ГБ | `geo_point(lat, lon)`, `IDX(city, status, guests_max)`, `IDX(base_price)`, `IDX(rating_avg)`, `IDX(amenities_bitmap)` | 12 primary shards, 1 replica each | 1 replica per shard |
 
-| Объект               | Денормализация                                                                                                            | Зачем                                                                         |
-|----------------------|---------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------|
-| `bookings`           | `host_id`, `listing_id`, `total_price`, `currency` хранятся в бронировании                                                | не читать `listings` при истории поездок, выплатах и отменах                  |
-| `reviews`            | `listing_id`, `author_id` хранятся в отзыве                                                                               | быстро выводить отзывы по объявлению и автору                                 |
-| `listing_search`     | хранит `city`, `lat/lon`, `guests_max`, `base_price`, `rating_avg`, `reviews_count`, `amenities_bitmap`, `cover_photo_id` | выполнять поиск без тяжёлых JOIN на `listings + reviews + amenities + photos` |
-| `listing_card_cache` | хранит уже собранную карточку объявления                                                                                  | не собирать ответ из нескольких таблиц на каждом запросе                      |
+## 6.4 Денормализация
 
-`listing_search` — это физическая search-проекция, которая пересобирается при изменении объявления, фотографий, агрегата отзывов и удобств.
+| Объект | Денормализация | Зачем |
+|--------|---------------|-------|
+| `bookings` | хранит `host_id`, `total_price`, `currency` | не читать `listings` при истории поездок и выплатах |
+| `reviews` | хранит `listing_id`, `author_id` | быстро выводить отзывы по объявлению без JOIN |
+| `listing_search` | хранит `city`, `lat/lon`, `guests_max`, `base_price`, `rating_avg`, `reviews_count`, `amenities_bitmap`, `cover_photo_id` | поиск без тяжёлых JOIN на `listings + reviews + amenities + photos` |
 
-## 6.4 Таблицы и хранилища
+`listing_search` — поисковая проекция, которая пересобирается асинхронно через Kafka при изменении объявления, фотографий или агрегата отзывов.
 
-### 6.4.1 Реляционные таблицы
+## 6.5 Кэши и буферы
 
-| Таблица / объект    | СУБД                      | Размер строки | Число строк | Общий размер | Индексы                                                                                                                                          | Шардирование                                                                                | Репликация / резервирование | Клиент / интеграция                   |
-|---------------------|---------------------------|--------------:|------------:|-------------:|--------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------|-----------------------------|---------------------------------------|
-| `users`             | PostgreSQL / user-cluster |        ~600 B |     200 млн |      ~120 ГБ | `PK(user_id)`, `UNIQUE(email)`, `UNIQUE(phone)`, `IDX(created_at)`                                                                               | `HASH(user_id)`, 8 shards                                                                   | primary + 2 replicas        | `SQLAlchemy 2 + asyncpg`, `PgBouncer` |
-| `saved_listings`    | PostgreSQL / user-cluster |         ~50 B |     ~6 млрд |      ~300 ГБ | `PK(user_id, listing_id)`, `IDX(listing_id, created_at DESC)`                                                                                    | `HASH(user_id)`, 8 shards                                                                   | primary + 2 replicas        | `SQLAlchemy 2 + asyncpg`, `PgBouncer` |
-| `listings`          | PostgreSQL / core-cluster |         ~3 КБ |       8 млн |       ~24 ГБ | `PK(listing_id)`, `IDX(host_id, created_at DESC)`, `IDX(city, status)`, `GiST(lat, lon)`                                                         | `HASH(listing_id)`, 16 shards                                                               | primary + 2 replicas        | `SQLAlchemy 2 + asyncpg`, `PgBouncer` |
-| `listing_search`    | PostgreSQL / core-cluster |        ~256 B |       8 млн |        ~2 ГБ | `PK(listing_id)`, `IDX(city, status, guests_max)`, `IDX(base_price)`, `GIN(amenities_bitmap)`, `GiST(lat, lon)`                                  | `HASH(listing_id)`, 16 shards                                                               | primary + 2 replicas        | `SQLAlchemy 2 + asyncpg`, `PgBouncer` |
-| `listing_photos`    | PostgreSQL / core-cluster |        ~200 B |     120 млн |       ~24 ГБ | `PK(photo_id)`, `IDX(listing_id, sort_order)`, `UNIQUE(listing_id, sort_order)`                                                                  | `HASH(listing_id)`, 16 shards                                                               | primary + 2 replicas        | `SQLAlchemy 2 + asyncpg`, `PgBouncer` |
-| `amenities`         | PostgreSQL / core-cluster |         ~64 B |        ~100 |         мало | `PK(amenity_id)`                                                                                                                                 | reference table on all shards                                                               | replication to all shards   | `SQLAlchemy 2 + asyncpg`              |
-| `listing_amenities` | PostgreSQL / core-cluster |         ~24 B |     160 млн |      ~3.8 ГБ | `PK(listing_id, amenity_id)`, `IDX(amenity_id, listing_id)`                                                                                      | `HASH(listing_id)`, 16 shards                                                               | primary + 2 replicas        | `SQLAlchemy 2 + asyncpg`, `PgBouncer` |
-| `availability_day`  | PostgreSQL / core-cluster |         ~32 B |    2.9 млрд |       ~93 ГБ | `PK(listing_id, day)`, `IDX(day, is_available)`, `IDX(updated_at)`                                                                               | `HASH(listing_id)`, 16 shards; внутри шарда `RANGE(day)` по месяцам                         | primary + 2 replicas        | `SQLAlchemy 2 + asyncpg`, `PgBouncer` |
-| `bookings`          | PostgreSQL / core-cluster |        ~300 B |      3 млрд |      ~0.9 ТБ | `PK(booking_id)`, `IDX(guest_id, created_at DESC)`, `IDX(host_id, created_at DESC)`, `IDX(listing_id, check_in)`, `IDX(status, created_at DESC)` | `HASH(listing_id)`, 16 shards                                                               | primary + 2 replicas        | `SQLAlchemy 2 + asyncpg`, `PgBouncer` |
-| `payments`          | PostgreSQL / core-cluster |        ~200 B |      3 млрд |      ~600 ГБ | `PK(payment_id)`, `UNIQUE(booking_id)`, `UNIQUE(idempotency_key)`, `IDX(status, created_at DESC)`                                                | `HASH(listing_id)` через колокацию с `bookings`, 16 shards                                  | primary + 2 replicas        | `SQLAlchemy 2 + asyncpg`, `PgBouncer` |
-| `reviews`           | PostgreSQL / core-cluster |        ~500 B |    1.2 млрд |      ~600 ГБ | `PK(review_id)`, `UNIQUE(booking_id)`, `IDX(listing_id, created_at DESC)`, `IDX(author_id, created_at DESC)`                                     | `HASH(listing_id)`, 16 shards                                                               | primary + 2 replicas        | `SQLAlchemy 2 + asyncpg`, `PgBouncer` |
-| `media_objects`     | PostgreSQL / core-cluster |        ~160 B |    ~270 млн |       ~43 ГБ | `PK(media_object_id)`, `UNIQUE(object_key)`, `IDX(created_at)`                                                                                   | `HASH(listing_id)` через связь с фото; для аватаров — отдельная запись по `media_object_id` | primary + 2 replicas        | `SQLAlchemy 2 + asyncpg`, `PgBouncer` |
+### Кэши (Redis)
 
-### 6.4.2 Кэши и файловые данные
+| Кэш | Кластер | Ключ | Размер записи | Объём hot set | TTL | Peak read RPS | Консистентность |
+|-----|---------|------|--------------|--------------|-----|--------------|----------------|
+| `session_cache` | session-cluster | `session:{session_id}` | ~200 B | ~10 ГБ | 30 дней | ~1 734 | strong |
+| `listing_card_cache` | cache-cluster | `listing_card:{listing_id}` | ~4 КБ | ~4 ГБ | 5 минут, invalidate on update | ~6 075 | eventual |
+| `availability_cache` | cache-cluster | `availability:{listing_id}:{checkin}:{checkout}` | ~64 B | ~640 МБ | 1 минута, invalidate on booking | ~6 075 | eventual на чтение, strong на бронирование |
 
-| Объект                  | Хранилище                    | Ключ                                             |             Размер |           Объём | Шардирование / резервирование                 | Клиент / интеграция  |
-|-------------------------|------------------------------|--------------------------------------------------|-------------------:|----------------:|-----------------------------------------------|----------------------|
-| `session_cache`         | Redis / session-cluster      | `session:{session_id}`                           |             ~200 B |          ~10 ГБ | Redis Cluster, 3 masters + 3 replicas         | `redis-py`           |
-| `listing_card_cache`    | Redis / cache-cluster        | `listing_card:{listing_id}`                      |              ~4 КБ |   ~4 ГБ hot set | Redis Cluster, 6 masters + 6 replicas         | `redis-py`           |
-| `availability_cache`    | Redis / cache-cluster        | `availability:{listing_id}:{checkin}:{checkout}` |              ~64 B | ~640 МБ hot set | Redis Cluster, 6 masters + 6 replicas         | `redis-py`           |
-| Фото / превью / аватары | S3-compatible object storage | `object_key`                                     |          80–500 КБ |          ~92 ТБ | replication / erasure coding on storage layer | `boto3` / `aioboto3` |
-| CDN cache               | CDN                          | URL / `object_key`                               | зависит от объекта |         hot set | edge replication by CDN                       | HTTP integration     |
+### Буферы (Kafka)
 
-## 6.5 Балансировка запросов и мультиплексирование подключений
+| Топик | Продюсер | Потребитель | Партиционирование | Retention | Назначение |
+|-------|---------|------------|------------------|-----------|-----------|
+| `listing-updates` | Listing API | Elasticsearch indexer | `listing_id` | 3 дня | асинхронное обновление поисковой проекции |
+| `media-events` | Media API | thumbnail worker | `listing_id` | 3 дня | генерация превью после загрузки фото |
 
-### PostgreSQL
+## 6.6 Шардирование и резервирование
 
-Для PostgreSQL используется разделение read/write трафика:
+| Кластер / сущность | Ключ шардирования | Число shards | Резервирование | Примечание |
+|-------------------|------------------|-------------|---------------|-----------|
+| PostgreSQL user-cluster | `HASH(user_id)` | 8 | primary + 2 async replicas | user-centric данные |
+| PostgreSQL core-cluster (обычные таблицы) | `HASH(listing_id)` | 16 | primary + 2 async replicas | listing-centric данные |
+| PostgreSQL core-cluster (`bookings`, `payments`, `availability_day`) | `HASH(listing_id)` | 16 | primary + **1 синхронная** + 1 async replica | strong consistency на критическом пути |
+| Elasticsearch | `listing_id` | 12 primary | 1 replica per shard | поиск |
+| Redis session-cluster | hash slots | 3 masters | 3 replicas | потеря сессий нежелательна |
+| Redis cache-cluster | hash slots | 6 masters | 6 replicas | потеря допустима, восстанавливается из PostgreSQL |
+| Kafka | `listing_id` | 3 brokers | replication factor 3 | каждое сообщение на 3 брокерах |
+| S3 object storage | — | — | erasure coding | потеря диска не приводит к потере файлов |
 
-* **write-запросы** идут в primary соответствующего шарда;
-* **read-запросы** идут в read replicas.
+## 6.7 Клиентские библиотеки и интеграции
 
-Схема доступа:
+| Компонент | Библиотека | Назначение |
+|-----------|-----------|-----------|
+| PostgreSQL | `asyncpg` + `SQLAlchemy 2` | async OLTP-запросы и транзакции |
+| PostgreSQL connection pool | `PgBouncer` (transaction pooling) | мультиплексирование подключений |
+| Elasticsearch | `elasticsearch-py` (async) | индексация и поисковые запросы |
+| Redis | `redis-py` (cluster mode) | кэши и сессии |
+| Kafka | `aiokafka` | producer и consumer для событий |
+| S3 | `aioboto3` | загрузка и чтение файлов |
 
-* приложение → **HAProxy** → **PgBouncer** → PostgreSQL shard
-* `PgBouncer` используется в режиме **transaction pooling**
-* `HAProxy` держит отдельные upstream-пулы для `rw` и `ro`
-
-Это решает две задачи:
-
-* балансировка чтений между репликами;
-* мультиплексирование большого числа клиентских соединений в меньшее число backend-соединений к PostgreSQL.
-
-### Redis
-
-Для Redis используется cluster mode:
-
-* клиент знает hash slots;
-* запрос сразу идёт на нужный master;
-* replica используется для failover.
-
-### Object storage
-
-Для object storage используется HTTP SDK с keep-alive и connection pool. Основной пользовательский read-трафик по файлам уходит через CDN, поэтому origin получает только запись новых объектов и cache miss.
-
-## 6.6 Надёжность и резервирование
+## 6.8 Балансировка запросов и мультиплексирование подключений
 
 ### PostgreSQL
 
-Для каждого PostgreSQL shard используется:
+Приложение → **HAProxy** → **PgBouncer** → PostgreSQL shard
 
-* **1 основная**
-* **2 синхронная или асинхронная реплики** в зависимости от роли данных:
+- **write-запросы** → primary
+- **read-запросы** → read replicas
+- `PgBouncer` в режиме **transaction pooling** — мультиплексирует большое число клиентских соединений в меньшее число backend-соединений к PostgreSQL
 
-  * для `bookings`, `payments`, `availability_day` — минимум одна синхронная replica;
-  * для остальных таблиц — асинхронные read replicas допустимы.
+### Elasticsearch
 
-Failover выполняется средствами оркестратора PostgreSQL-кластера.
-
-### Redis
-
-* session-cluster: replica обязательна, так как потеря сессий нежелательна;
-* cache-cluster: replica нужна для отказоустойчивости, полная потеря кэша допустима, так как он восстанавливается из PostgreSQL и object storage.
-
-### Object storage
-
-Используется встроенная репликация или erasure coding на стороне хранилища. Потеря одного диска или узла не должна приводить к потере фотографий.
-
-## 6.7 Схема резервного копирования
-
-### PostgreSQL
-
-Для PostgreSQL используется:
-
-* **ежедневный full base backup**
-* **непрерывная архивация журнал предзаписи**
-* **PITR** для восстановления до точки во времени
-* хранение backup в object storage
-* retention:
-
-  * полный бекап — 14 дней
-  * журнал предзаписи — 14 дней
-  * еженедельный long-term backup — 3 месяца
-
-Это покрывает:
-
-* логические ошибки пользователя;
-* отказ узла;
-* восстановление после повреждения данных.
+- запросы идут через координирующую ноду кластера
+- координатор сам распределяет запрос по нужным shards
 
 ### Redis
 
-* session-cluster: `AOF everysec` + периодический `RDB snapshot`
-* cache-cluster: backup не обязателен, так как данные восстанавливаются пересчётом
+- cluster-aware клиент знает hash slots
+- запрос сразу идёт на нужный master
+- replica используется только для failover
 
-### Object storage
+### Kafka
 
-* versioning для объектов;
-* lifecycle policy:
+- producer пишет в ведущий раздел по ключу `listing_id`
+- consumer group читает разделы параллельно
 
-  * оригиналы фото — long-term;
-  * превью могут быть пересозданы, но хранятся вместе с оригиналами;
-* периодическая проверка checksum для контроля целостности.
+## 6.9 Проверка нагрузки на хранилища
 
-## 6.8 Проверка, что выбранные хранилища выдерживают нагрузку
+### PostgreSQL user-cluster
 
-### user-cluster
+| Таблица | LPS (чтение) | Peak write RPS | Размер на shard |
+|---------|-------------|---------------|----------------|
+| `users` | 1 734 | ~10 | ~15 ГБ |
+| `sessions` | 1 734 | ~600 | ~1.25 ГБ |
+| `saved_listings` | 20 000 | ~50 | ~37.5 ГБ |
+| **Итого на shard** | **~23 468 LPS** | **~660** | **~54 ГБ** |
 
-Общий размер:
+Нагрузка небольшая — PostgreSQL на SSD легко выдерживает.
 
-* `users` ~120 ГБ
-* `saved_listings` ~300 ГБ
+### PostgreSQL core-cluster
 
-Итого: **~420 ГБ**
+| Таблица | LPS (чтение) | Peak write RPS | Размер на shard |
+|---------|-------------|---------------|----------------|
+| `listings` | 6 075 | ~5 | ~1.5 ГБ |
+| `listing_photos` | 91 125 | ~30 | ~1.5 ГБ |
+| `availability_day` | 182 250 | ~150 | ~5.8 ГБ |
+| `bookings` | 900 | ~47 | ~56 ГБ |
+| `payments` | 100 | ~100 | ~37.5 ГБ |
+| `reviews` | 30 000 | ~17 | ~37.5 ГБ |
+| **Итого на shard** | **~310 450 LPS** | **~349** | **~140 ГБ** |
 
-При 8 шардах:
+Основная нагрузка — `availability_day` и `listing_photos`. При 2 read replicas на shard: ~103 483 LPS на replica — допустимо.
 
-* **~52.5 ГБ на shard**
+### Elasticsearch
 
-Нагрузка:
+| Метрика | Значение |
+|---------|---------|
+| Peak search RPS | 6 945 |
+| Rows per query | 20 |
+| LPS | 138 900 |
+| Размер индекса | ~2 ГБ |
+| На shard | ~167 МБ |
 
-* peak read ~1734 QPS по `users`
-* умеренная запись
-
-Это небольшой объём и невысокий QPS для PostgreSQL на shard.
-
-### core-cluster
-
-Основной объём:
-
-* `bookings` ~0.9 ТБ
-* `payments` ~0.6 ТБ
-* `reviews` ~0.6 ТБ
-* `availability_day` ~93 ГБ
-* прочие таблицы ещё ~100 ГБ
-
-Итого: **~2.3 ТБ**
-
-При 16 шардах:
-
-* **~140–145 ГБ на shard**
-
-Пиковая нагрузка:
-
-* основной read идёт на `listing_search`, `listings`, `availability_day`
-* основной write идёт на `bookings`, `payments`, `availability_day`
-
-Даже если принять суммарный listing-centric peak read порядка **15–18k QPS**,
-на один shard приходится примерно **950–1100 QPS** до репликации.
-При двух read replicas это около **300–550 QPS на replica**, что допустимо.
+Индекс целиком помещается в RAM — поиск работает быстро.
 
 ### Redis
 
-* session-cluster: ~10 ГБ и около 2k read QPS — легко помещается;
-* cache-cluster: hot set меньше 10 ГБ, peak read около 10–15k QPS — нормальная нагрузка для Redis Cluster.
+| Кластер | Hot set | Peak read RPS |
+|---------|---------|--------------|
+| session-cluster | ~10 ГБ | ~1 734 |
+| cache-cluster | ~5 ГБ | ~12 150 |
 
-### Object storage + CDN
+Оба hot set помещаются в RAM — нагрузка для Redis штатная.
 
-Основной медиа-трафик уходит в CDN. Origin получает только:
+## 6.10 Схема резервного копирования
 
-* загрузку новых фото;
-* редкие чтения при cache miss;
-* backup / replication трафик.
+| Компонент | Механизм | Расписание | Retention | Восстановление |
+|-----------|---------|-----------|-----------|---------------|
+| PostgreSQL (все кластеры) | full backup + непрерывная архивация WAL | full backup ежедневно, WAL постоянно | daily — 7 дней, weekly — 8 недель, monthly — 12 месяцев | PITR из full backup + WAL до нужного момента |
+| Elasticsearch | snapshot индекса в S3 | каждые 6 часов | daily snapshots — 14 дней, weekly — 8 недель | восстановление из snapshot, затем переиндексация из Kafka или PostgreSQL |
+| Redis session-cluster | AOF everysec + RDB snapshot | RDB каждые 15 минут, выгрузка в S3 ежедневно | snapshots — 3 дня, daily в S3 — 14 дней | запуск из последнего RDB; при полной потере сессии инвалидируются |
+| Redis cache-cluster | RDB snapshot | ежедневно | 3 дня | при потере кэш прогревается из PostgreSQL |
+| Kafka | хранение в топиках | постоянно | 3 дня | повторное чтение из топика; при полной потере переиндексация из PostgreSQL |
+| S3 object storage | versioning + erasure coding | постоянно | версии — 30 дней | восстановление из версий объекта |
 
-Следовательно, object storage выдерживает нагрузку при условии, что пользовательская раздача идёт через CDN.
-
-## 6.9 Вывод
-
-Физическая схема данных строится вокруг двух PostgreSQL-кластеров, Redis-кластеров для сессий и кэшей, а также объектного хранилища для медиа.
-
-Такое разделение позволяет:
-
-* выбрать естественный shard key для разных групп данных;
-* изолировать пользовательские и listing-centric нагрузки;
-* обеспечить сильную консистентность на критическом пути бронирования;
-* вынести горячие чтения в кэш и CDN;
-* обеспечить резервирование, PITR и отказоустойчивость на уровне каждого хранилища.
-
-
-## 6.10 Соответствие API и физических хранилищ
-
-Ниже показано, какие физические хранилища используются в основных API-сценариях. Это связывает логическую модель данных из раздела 5 с физической схемой из раздела 6.
-
-| API / сценарий             | Основные хранилища                                         | Что читается / записывается                                                                                            |
-|----------------------------|------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------|
-| **Поиск жилья**            | PostgreSQL `core-cluster`, Redis `availability_cache`, CDN | чтение `listing_search`, `availability_cache`; превью изображений через CDN                                            |
-| **Карточка объявления**    | PostgreSQL `core-cluster`, Redis `listing_card_cache`, CDN | чтение `listings`, `listing_photos`, `reviews`; фото через CDN; при cache hit карточка берётся из `listing_card_cache` |
-| **Календарь доступности**  | PostgreSQL `core-cluster`, Redis `availability_cache`      | чтение `availability_day`; при изменении календаря запись в `availability_day` и инвалидирование `availability_cache`  |
-| **Бронирование**           | PostgreSQL `core-cluster`                                  | транзакционная запись в `bookings`, `payments`, обновление `availability_day`; кэш после записи инвалидируется         |
-| **Онлайн-платёж**          | PostgreSQL `core-cluster`, внешний платёжный провайдер     | запись/обновление `payments`, изменение статуса `bookings`                                                             |
-| **Личный кабинет гостя**   | PostgreSQL `user-cluster`, PostgreSQL `core-cluster`       | чтение `users`, `saved_listings` из `user-cluster`; чтение `bookings`, `payments`, `reviews` из `core-cluster`         |
-| **Личный кабинет хозяина** | PostgreSQL `user-cluster`, PostgreSQL `core-cluster`, CDN  | чтение `users` из `user-cluster`; чтение `listings`, `bookings`, `reviews`; фото через CDN                             |
-| **Отзывы и рейтинги**      | PostgreSQL `core-cluster`, Redis `listing_card_cache`      | запись `reviews`; чтение `reviews`; после новой записи инвалидируется `listing_card_cache`                             |
-| **Авторизация / сессии**   | PostgreSQL `user-cluster`, Redis `session_cache`           | чтение `users`; создание/обновление/чтение сессии в `session_cache`                                                    |
-
-### Пояснение
-
-* **user-cluster** обслуживает user-centric данные: профиль пользователя и сохранённые объявления;
-* **core-cluster** обслуживает listing-centric и booking-centric данные: карточки, доступность, бронирования, платежи, отзывы;
-* **Redis** используется для hot path чтений и сессий;
-* **CDN + object storage** обслуживают весь медиа-контент.
+---
 
 # Список источников
 
