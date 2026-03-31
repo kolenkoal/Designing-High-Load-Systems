@@ -1018,6 +1018,189 @@ flowchart TB
 
 ---
 
+# 7. Алгоритмы
+
+## 7.1 Проблема проверки доступности
+
+При поиске жилья система должна из 8 млн активных объявлений отфильтровать те, у которых **все дни** в диапазоне `[check_in, check_out)` свободны. Наивный подход — для каждого кандидата делать отдельный запрос к `availability_day` — не работает:
+
+| Проблема | Цифра |
+|----------|-------|
+| Активных объявлений | 8 млн |
+| LPS на `availability_day` | 182 250 строк/с |
+| Строк на проверку одного объявления | 30 (типичный диапазон) |
+| Запросов при наивном подходе на 1 поиск | до 8 млн |
+
+Решение разбито на два шага с разными требованиями к консистентности:
+
+| Шаг | Где | Консистентность | Почему |
+|-----|-----|----------------|--------|
+| Фильтрация при поиске | Elasticsearch | eventual | скорость, масштаб — допустима задержка в секунды |
+| Финальная проверка при бронировании | PostgreSQL + `FOR UPDATE` | strong | защита от double booking |
+
+## 7.2 Индекс доступности в Elasticsearch
+
+### Как хранится
+
+Каждый документ `listing_search` содержит массив занятых дат `unavailable_dates`. Это денормализованное поле, которое агрегирует все занятые дни из `availability_day`:
+
+```json
+{
+  "listing_id": 123456,
+  "city": "Paris",
+  "lat": 48.8566,
+  "lon": 2.3522,
+  "guests_max": 4,
+  "base_price": 120.00,
+  "rating_avg": 4.87,
+  "amenities_bitmap": 1835,
+  "cover_photo_id": 789,
+  "unavailable_dates": [
+    "2025-07-01",
+    "2025-07-02",
+    "2025-07-03",
+    "2025-08-15",
+    "2025-08-16"
+  ]
+}
+```
+
+### Как выглядит поисковый запрос
+
+Фильтрация по датам происходит прямо в Elasticsearch — без обращения к PostgreSQL:
+
+```json
+{
+  "query": {
+    "bool": {
+      "filter": [
+        { "term":  { "city": "Paris" } },
+        { "range": { "base_price": { "lte": 200 } } },
+        { "range": { "guests_max": { "gte": 2 } } },
+        {
+          "bool": {
+            "must_not": {
+              "terms": {
+                "unavailable_dates": [
+                  "2025-07-10",
+                  "2025-07-11",
+                  "2025-07-12"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+Запрос возвращает только те объявления, у которых **ни одна** из запрошенных дат не входит в `unavailable_dates`.
+
+### Как обновляется
+
+После каждого бронирования или изменения календаря хозяином Booking API / Listing API публикует событие в топик Kafka `availability-updates`. Elasticsearch indexer читает топик и обновляет документ:
+
+```
+Booking API
+    → Kafka topic: availability-updates (key = listing_id)
+        → Elasticsearch indexer
+            → UPDATE listing_search SET unavailable_dates = [...] WHERE listing_id = 123456
+```
+
+Обновление **асинхронное** — между бронированием и обновлением индекса возможна задержка в несколько секунд. Это допустимо для поиска, но недопустимо для финального шага бронирования — поэтому нужен второй шаг.
+
+## 7.3 Финальная проверка при бронировании
+
+Когда пользователь нажимает "Забронировать", система выполняет финальную проверку **в PostgreSQL внутри транзакции** — Elasticsearch и кэш здесь не используются, потому что нужна strong consistency.
+
+### Почему не Elasticsearch
+
+Elasticsearch — eventual consistency. Между моментом бронирования и обновлением индекса проходит несколько секунд. Два пользователя могут одновременно увидеть объявление как доступное и оба попытаться забронировать — **double booking**.
+
+### Транзакция с `SELECT FOR UPDATE`
+
+```sql
+BEGIN;
+
+-- 1. Блокируем строки availability_day на запрошенные даты
+--    Второй запрос на те же даты будет ждать снятия блокировки
+SELECT listing_id, day, is_available
+FROM availability_day
+WHERE listing_id = $1
+  AND day >= $2        -- check_in
+  AND day <  $3        -- check_out
+FOR UPDATE;
+
+-- 2. Проверяем что все дни свободны
+--    Если хотя бы один день занят → ROLLBACK
+--    Приложение возвращает пользователю ошибку "даты недоступны"
+
+-- 3. Помечаем дни занятыми
+UPDATE availability_day
+SET is_available = FALSE,
+    updated_at   = NOW()
+WHERE listing_id = $1
+  AND day >= $2
+  AND day <  $3;
+
+-- 4. Создаём запись бронирования
+INSERT INTO bookings (
+    guest_id, listing_id, host_id,
+    check_in, check_out, guests_count,
+    total_price, service_fee, currency, status
+) VALUES ($4, $1, $5, $2, $3, $6, $7, $8, $9, 'confirmed');
+
+-- 5. Создаём запись платежа
+INSERT INTO payments (
+    booking_id, provider, amount,
+    currency, status, idempotency_key
+) VALUES (lastval(), $10, $7, $9, 'pending', $11);
+
+COMMIT;
+```
+
+### Почему `FOR UPDATE` защищает от double booking
+
+Без блокировки два одновременных запроса оба проходят проверку доступности и оба создают бронь. `SELECT FOR UPDATE` блокирует строки `availability_day` до конца транзакции — второй запрос ждёт, и после снятия блокировки видит уже занятые даты.
+
+## 7.4 Индекс в PostgreSQL для финальной проверки
+
+Финальная проверка использует составной первичный ключ `(listing_id, day)` — это B-tree индекс, который позволяет делать эффективный range scan:
+
+```sql
+-- Структура таблицы и индекса
+CREATE TABLE availability_day (
+    listing_id    BIGINT   NOT NULL,
+    day           DATE     NOT NULL,
+    is_available  BOOLEAN  NOT NULL DEFAULT TRUE,
+    price_override DECIMAL,
+    updated_at    TIMESTAMP NOT NULL,
+    PRIMARY KEY (listing_id, day)  -- B-tree, составной
+) PARTITION BY RANGE (day);       -- партиции по месяцам
+```
+
+| Свойство индекса | Значение |
+|-----------------|---------|
+| Тип | B-tree составной |
+| Порядок сканирования | `listing_id` фиксирован → range scan по `day` |
+| Строк на запрос | равно длине диапазона (обычно 3–14 дней) |
+| Партиция | запрос попадает в 1–2 партиции по месяцам |
+| Блокировка | `FOR UPDATE` на уровне строк |
+
+## 7.5 Итоговая производительность
+
+| Операция | Хранилище | Сложность | Строк на запрос | Примечание |
+|----------|-----------|-----------|----------------|-----------|
+| Поиск по датам | Elasticsearch | O(1) на документ | 20 документов | фильтр по массиву `unavailable_dates` |
+| Обновление индекса | Kafka → Elasticsearch | async | — | задержка секунды, eventual |
+| Финальная проверка | PostgreSQL B-tree | O(log N + k) | k = кол-во дней | range scan по `(listing_id, day)` |
+| Блокировка строк | PostgreSQL | O(k) | k × 2 | `FOR UPDATE` + `UPDATE` в одной транзакции |
+| Инвалидация кэша | Redis | O(1) | — | `DEL` после успешного бронирования |
+
+---
+
 # Список источников
 
 1. Airbnb — онлайн-платформа для поиска и размещения краткосрочной аренды жилья: [https://ru.wikipedia.org/wiki/Airbnb](https://ru.wikipedia.org/wiki/Airbnb)
