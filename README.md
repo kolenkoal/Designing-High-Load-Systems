@@ -432,7 +432,7 @@ $$N_{work} = \left\lceil \frac{5}{4} \right\rceil = 2, \quad N_{total} = 2 + 1 =
 
 | Функционал MVP | Сущности модели данных |
 |---|---|
-| **Поиск жилья** | `listing_search`, `availability_day` |
+| **Поиск жилья** | `listing_search` (содержит `unavailable_dates`) |
 | **Карточка объявления** | `listings`, `listing_photos`, `reviews`, `users` |
 | **Календарь доступности** | `availability_day`, `listings` |
 | **Бронирование** | `users`, `listings`, `availability_day`, `bookings` |
@@ -526,6 +526,7 @@ erDiagram
         bigint amenities_bitmap
         bigint cover_photo_id
         string status
+        date[] unavailable_dates
     }
 
     LISTING_PHOTOS {
@@ -645,11 +646,11 @@ $$LPS = RPS_{peak} \times rows\_per\_query$$
 
 ### Сценарий 1: Поиск жилья
 
-Запрос идёт **только в `listing_search`** — это денормализованная проекция, которая содержит всё необходимое для выдачи (цена, рейтинг, геолокация, удобства, обложка). JOIN не нужен.
+Запрос идёт **только в `listing_search`** — это денормализованная проекция, которая содержит всё необходимое для выдачи (цена, рейтинг, геолокация, удобства, обложка, занятые даты). JOIN не нужен.
 
 | Таблица | Строк на запрос | Операция |
 |---------|----------------|---------|
-| `listing_search` | 20 | seq scan по индексу `(city, status, guests_max)` |
+| `listing_search` | 20 | index scan по `(city, status, guests_max)` + фильтр `unavailable_dates NOT IN [check_in..check_out]` |
 | **Итого** | **20 строк** | без JOIN |
 
 ### Сценарий 2: Карточка объявления
@@ -872,7 +873,7 @@ flowchart TB
 | `payments` | PostgreSQL / core-cluster | ~200 B | 3 млрд | ~600 ГБ | `PK(payment_id)`, `UNIQUE(booking_id)`, `UNIQUE(idempotency_key)`, `IDX(status, created_at DESC)` | колоцирован с `bookings` по `listing_id`, 16 shards | primary + **1 синхронная** replica + 1 async |
 | `reviews` | PostgreSQL / core-cluster | ~500 B | 1.2 млрд | ~600 ГБ | `PK(review_id)`, `UNIQUE(booking_id)`, `IDX(listing_id, created_at DESC)`, `IDX(author_id, created_at DESC)` | `HASH(listing_id)`, 16 shards | primary + 2 async replicas |
 | `media_objects` | PostgreSQL / core-cluster | ~160 B | ~270 млн | ~43 ГБ | `PK(media_object_id)`, `UNIQUE(object_key)`, `IDX(created_at)` | `HASH(listing_id)`, 16 shards | primary + 2 replicas |
-| `listing_search` | **Elasticsearch 8** | ~256 B | 8 млн | ~2 ГБ | `geo_point(lat, lon)`, `IDX(city, status, guests_max)`, `IDX(base_price)`, `IDX(rating_avg)`, `IDX(amenities_bitmap)` | 12 primary shards, 1 replica each | 1 replica per shard |
+| `listing_search` | **Elasticsearch 8** | ~256 B | 8 млн | ~2 ГБ | `geo_point(lat, lon)`, `IDX(city, status, guests_max)`, `IDX(base_price)`, `IDX(rating_avg)`, `IDX(amenities_bitmap)`, `IDX(unavailable_dates)` | 12 primary shards, 1 replica each | 1 replica per shard |
 
 ## 6.4 Денормализация
 
@@ -892,13 +893,14 @@ flowchart TB
 |-----|---------|------|--------------|--------------|-----|--------------|----------------|
 | `session_cache` | session-cluster | `session:{session_id}` | ~200 B | ~10 ГБ | 30 дней | ~1 734 | strong |
 | `listing_card_cache` | cache-cluster | `listing_card:{listing_id}` | ~4 КБ | ~4 ГБ | 5 минут, invalidate on update | ~6 075 | eventual |
-| `availability_cache` | cache-cluster | `availability:{listing_id}:{checkin}:{checkout}` | ~64 B | ~640 МБ | 1 минута, invalidate on booking | ~6 075 | eventual на чтение, strong на бронирование |
+| `availability_cache` | cache-cluster | `availability:{listing_id}:{checkin}:{checkout}` | ~64 B | ~640 МБ | 1 минута, invalidate on booking | ~150 | strong — только для финальной проверки перед бронированием, поиск по датам идёт в Elasticsearch |
 
 ### Буферы (Kafka)
 
 | Топик | Продюсер | Потребитель | Партиционирование | Retention | Назначение |
 |-------|---------|------------|------------------|-----------|-----------|
 | `listing-updates` | Listing API | Elasticsearch indexer | `listing_id` | 3 дня | асинхронное обновление поисковой проекции |
+| `availability-updates` | Booking API, Listing API | Elasticsearch indexer | `listing_id` | 3 дня | обновление `unavailable_dates` в Elasticsearch после бронирования или изменения календаря хозяином |
 | `media-events` | Media API | thumbnail worker | `listing_id` | 3 дня | генерация превью после загрузки фото |
 
 ## 6.6 Шардирование и резервирование
