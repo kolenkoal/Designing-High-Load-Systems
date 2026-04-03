@@ -1205,6 +1205,31 @@ CREATE TABLE availability_day (
 
 ---
 
+# 8. Технологии
+
+| Технология |             Применение             |                                                                                                              Почему именно эта технология |
+|:-----------|:----------------------------------:|------------------------------------------------------------------------------------------------------------------------------------------:|
+| **PostgreSQL 16** |      Реляционная база данных       |                           Open-source, ACID, большое количество расширений, широкое комьюнити, поддержка шардирования и партиционирования |
+| **Elasticsearch 8** |          Поисковый движок          | Open-source, нативная поддержка полнотекстового поиска, геофильтров, горизонтальное шардирование, хранение массивов (`unavailable_dates`) |
+| **Redis 7** |        Key-value хранилище         |                                                     Sub-millisecond latency, open-source, cluster mode, подходит для кэшей и сессий с TTL |
+| **Apache Kafka** |          Брокер сообщений          |                                         Open-source, высокая пропускная способность, гарантия доставки, партиционирование по `listing_id` |
+| **MinIO** | S3-совместимое объектное хранилище |                                             Open-source, self-hosted, полностью совместим с S3 API, поддержка erasure coding и репликации |
+| **Python 3.12** |  Язык программирования (backend)   |                                                                       Широкая экосистема async-библиотек, популярность, большое комьюнити |
+| **FastAPI** |         Backend фреймворк          |                                              Async из коробки, автогенерация OpenAPI, высокая производительность среди Python-фреймворков |
+| **asyncpg** |         PostgreSQL драйвер         |                                                                                       Самый быстрый async-драйвер для PostgreSQL в Python |
+| **SQLAlchemy 2** |                ORM                 |                                                                                        Поддержка async, гибкость, совместимость с asyncpg |
+| **PgBouncer** |         Connection pooler          |                                                          Transaction pooling — мультиплексирует соединения к PostgreSQL, снижает нагрузку |
+| **elasticsearch-py** |        Elasticsearch клиент        |                                                                                                       Официальный async-клиент от Elastic |
+| **redis-py** |            Redis клиент            |                                                                                                         Поддержка cluster mode, async API |
+| **aiokafka** |            Kafka клиент            |                                                                                                      Async producer и consumer для Python |
+| **aioboto3** |             S3 клиент              |                                                                                               Async-обёртка над boto3, совместима с MinIO |
+| **React** |         Frontend фреймворк         |                                                                                Популярность, большая экосистема, компонентный подход, SPA |
+| **NGINX Ingress** |  Reverse-proxy / L7 балансировщик  |                                                                         Популярный веб-сервер, SSL termination, маршрутизация по hostname |
+| **Kubernetes** |      Оркестрация контейнеров       |                                                                       Service discovery, auto-scaling, health-check, управление репликами |
+| **CDN** |       Раздача медиаконтента        |                                                                Снижает нагрузку на origin, ускоряет доставку фото и статики пользователям |
+
+---
+
 # Список источников
 
 1. Airbnb — онлайн-платформа для поиска и размещения краткосрочной аренды жилья: [https://ru.wikipedia.org/wiki/Airbnb](https://ru.wikipedia.org/wiki/Airbnb)
