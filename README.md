@@ -1231,6 +1231,58 @@ CREATE TABLE availability_day (
 | **Jaeger**           |        Distributed tracing         |                                                                                          Трейсинг межсервисных запросов, поиск узких мест |
 | **CDN**              |       Раздача медиаконтента        |                                                                              Снижает нагрузку на origin, ускоряет доставку фото и статики |
 
+---
+# 9. Обеспечение надёжности
+
+## 9.1 Сводная таблица резервирования
+
+| Компонент | Способ резервирования | Детали |
+|-----------|----------------------|--------|
+| PostgreSQL / user-cluster | primary + 2 async replicas, PITR | full backup ежедневно, WAL постоянно; daily 7 дней, weekly 8 недель, monthly 12 месяцев |
+| PostgreSQL / core-cluster (обычные таблицы) | primary + 2 async replicas, PITR | full backup ежедневно, WAL постоянно; daily 7 дней, weekly 8 недель, monthly 12 месяцев |
+| PostgreSQL / core-cluster (`bookings`, `payments`, `availability_day`) | primary + **1 синхронная** + 1 async replica, PITR | синхронная реплика гарантирует отсутствие потери данных на критическом пути бронирования |
+| Elasticsearch | 12 primary shards + 1 replica each, snapshot в MinIO | snapshot каждые 6 часов; daily 14 дней, weekly 8 недель; при полной потере — переиндексация из Kafka или PostgreSQL |
+| Redis / session-cluster | 3 masters + 3 replicas, AOF + RDB | AOF everysec + RDB каждые 15 минут; выгрузка в S3 ежедневно; retention 14 дней |
+| Redis / cache-cluster | 6 masters + 6 replicas, RDB | потеря допустима — кэш прогревается из PostgreSQL; RDB ежедневно, retention 3 дня |
+| Kafka | replication factor 3, retention 3 дня | каждое сообщение на 3 брокерах; при полной потере — переиндексация из PostgreSQL |
+| MinIO (S3) | erasure coding + versioning | потеря диска или узла не приводит к потере файлов; версии объектов 30 дней |
+| NGINX Ingress / API | N+1, 9 нод | при отказе 1 ноды оставшиеся 8 покрывают пиковую нагрузку |
+| NGINX Ingress / Web | N+1, 3 ноды | при отказе 1 ноды оставшиеся 2 покрывают нагрузку |
+| L4 балансировщик | HA обеспечивается облачным провайдером | — |
+| Kubernetes pods | 2–3 реплики на сервис, разные узлы | health-check исключает недоступные поды из балансировки |
+| CDN | edge replication провайдером | при недоступности CDN — раздача напрямую с MinIO origin |
+
+## 9.2 Отказоустойчивость
+
+- **Автоматический failover** — при падении primary PostgreSQL Patroni переключает на реплику
+- **Circuit breaker** — на стороне клиента при межсервисных вызовах, предотвращает каскадные отказы
+- **Retry с экспоненциальной задержкой** — только для идемпотентных операций
+- **Rate limiting** — ограничение числа запросов на уровне NGINX Ingress
+- **Graceful shutdown** — сервисы завершают текущие запросы перед остановкой
+- **`idempotency_key` в `payments`** — защита от дублирования платежей при ретраях
+- **`SELECT FOR UPDATE`** — защита от double booking на критическом пути бронирования
+
+## 9.3 Деградация вместо полного отказа
+
+| Отказавший компонент | Поведение системы |
+|---------------------|------------------|
+| Elasticsearch | поиск недоступен, бронирование работает |
+| Redis cache-cluster | повышенная нагрузка на PostgreSQL, функционал сохраняется |
+| Kafka | обновление поисковой проекции приостанавливается, бронирование работает |
+| CDN | медиа раздаётся напрямую с MinIO origin |
+| Redis session-cluster | пользователи разлогиниваются, повторный вход работает |
+
+## 9.4 Observability
+
+| Инструмент | Назначение |
+|-----------|-----------|
+| **Prometheus** | сбор метрик со всех сервисов (pull-модель) |
+| **Grafana** | дашборды и alertmanager для мониторинга инцидентов |
+| **Jaeger** | distributed tracing межсервисных запросов |
+| **Structured logging** | JSON-логи со всех сервисов, централизованный сбор |
+
+---
+
 # Список источников
 
 1. Airbnb — онлайн-платформа для поиска и размещения краткосрочной аренды жилья: [https://ru.wikipedia.org/wiki/Airbnb](https://ru.wikipedia.org/wiki/Airbnb)
