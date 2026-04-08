@@ -1207,31 +1207,32 @@ CREATE TABLE availability_day (
 
 # 8. Технологии
 
-| Технология           |             Применение             |                                                                                                              Почему именно эта технология |
-|:---------------------|:----------------------------------:|------------------------------------------------------------------------------------------------------------------------------------------:|
-| **PostgreSQL 16**    |      Реляционная база данных       |                           Open-source, ACID, большое количество расширений, широкое комьюнити, поддержка шардирования и партиционирования |
-| **Elasticsearch 8**  |          Поисковый движок          | Open-source, нативная поддержка полнотекстового поиска, геофильтров, горизонтальное шардирование, хранение массивов (`unavailable_dates`) |
-| **Redis 7**          |        Key-value хранилище         |                                                     Sub-millisecond latency, open-source, cluster mode, подходит для кэшей и сессий с TTL |
-| **Apache Kafka**     |          Брокер сообщений          |                                         Open-source, высокая пропускная способность, гарантия доставки, партиционирование по `listing_id` |
-| **MinIO**            | S3-совместимое объектное хранилище |                                             Open-source, self-hosted, полностью совместим с S3 API, поддержка erasure coding и репликации |
-| **Python 3.12**      |  Язык программирования (backend)   |                                                                       Широкая экосистема async-библиотек, популярность, большое комьюнити |
-| **FastAPI**          |         Backend фреймворк          |                                              Async из коробки, автогенерация OpenAPI, высокая производительность среди Python-фреймворков |
-| **asyncpg**          |         PostgreSQL драйвер         |                                                                                       Самый быстрый async-драйвер для PostgreSQL в Python |
-| **SQLAlchemy 2**     |                ORM                 |                                                                                        Поддержка async, гибкость, совместимость с asyncpg |
-| **PgBouncer**        |         Connection pooler          |                                                          Transaction pooling — мультиплексирует соединения к PostgreSQL, снижает нагрузку |
-| **elasticsearch-py** |        Elasticsearch клиент        |                                                                                                       Официальный async-клиент от Elastic |
-| **redis-py**         |            Redis клиент            |                                                                                                         Поддержка cluster mode, async API |
-| **aiokafka**         |            Kafka клиент            |                                                                                                      Async producer и consumer для Python |
-| **aioboto3**         |             S3 клиент              |                                                                                               Async-обёртка над boto3, совместима с MinIO |
-| **React**            |         Frontend фреймворк         |                                                                                Популярность, большая экосистема, компонентный подход, SPA |
-| **NGINX Ingress**    |  Reverse-proxy / L7 балансировщик  |                                                                            SSL termination, маршрутизация по hostname, N+1 резервирование |
-| **Kubernetes**       |      Оркестрация контейнеров       |                                                                       Service discovery, auto-scaling, health-check, управление репликами |
-| **Prometheus**       |            Сбор метрик             |                                                              Pull-архитектура, широкая интеграция с Kubernetes и всеми компонентами стека |
-| **Grafana**          |       Мониторинг и алертинг        |                                                                                   Дашборды поверх Prometheus, alertmanager для инцидентов |
-| **Jaeger**           |        Distributed tracing         |                                                                                          Трейсинг межсервисных запросов, поиск узких мест |
-| **CDN**              |       Раздача медиаконтента        |                                                                              Снижает нагрузку на origin, ускоряет доставку фото и статики |
+| Технология | Применение | Почему именно эта технология |
+|:-----------|:----------:|-----------------------------:|
+| **PostgreSQL 16** | Реляционная база данных | Open-source, ACID, большое количество расширений, широкое комьюнити, поддержка шардирования и партиционирования |
+| **Elasticsearch 8** | Поисковый движок | Open-source, нативная поддержка полнотекстового поиска, геофильтров, горизонтальное шардирование, хранение массивов (`unavailable_dates`) |
+| **Redis 7** | Key-value хранилище | Sub-millisecond latency, open-source, cluster mode, подходит для кэшей и сессий с TTL |
+| **Apache Kafka** | Брокер сообщений | Open-source, высокая пропускная способность, гарантия доставки, партиционирование по `listing_id` |
+| **RustFS** | S3-совместимое объектное хранилище | Open-source, self-hosted, написан на Rust — высокая производительность и безопасность памяти, полностью совместим с S3 API, активно развивается |
+| **Python 3.12** | Язык программирования (backend) | Широкая экосистема async-библиотек, популярность, большое комьюнити |
+| **FastAPI** | Backend фреймворк | Async из коробки, автогенерация OpenAPI, высокая производительность среди Python-фреймворков |
+| **asyncpg** | PostgreSQL драйвер | Самый быстрый async-драйвер для PostgreSQL в Python |
+| **SQLAlchemy 2** | ORM | Поддержка async, гибкость, совместимость с asyncpg |
+| **PgBouncer** | Connection pooler | Transaction pooling — мультиплексирует соединения к PostgreSQL, снижает нагрузку |
+| **elasticsearch-py** | Elasticsearch клиент | Официальный async-клиент от Elastic |
+| **redis-py** | Redis клиент | Поддержка cluster mode, async API |
+| **aiokafka** | Kafka клиент | Async producer и consumer для Python |
+| **aioboto3** | S3 клиент | Async-обёртка над boto3, совместима с RustFS |
+| **React** | Frontend фреймворк | Популярность, большая экосистема, компонентный подход, SPA |
+| **NGINX Ingress** | Reverse-proxy / L7 балансировщик | SSL termination, маршрутизация по hostname, N+1 резервирование |
+| **Kubernetes** | Оркестрация контейнеров | Service discovery, auto-scaling, health-check, управление репликами |
+| **Prometheus** | Сбор метрик | Pull-архитектура, широкая интеграция с Kubernetes и всеми компонентами стека |
+| **Grafana** | Мониторинг и алертинг | Дашборды поверх Prometheus, alertmanager для инцидентов |
+| **Jaeger** | Distributed tracing | Трейсинг межсервисных запросов, поиск узких мест |
+| **CDN** | Раздача медиаконтента | Снижает нагрузку на origin, ускоряет доставку фото и статики |
 
 ---
+
 # 9. Обеспечение надёжности
 
 ## 9.1 Сводная таблица резервирования
@@ -1241,16 +1242,16 @@ CREATE TABLE availability_day (
 | PostgreSQL / user-cluster | primary + 2 async replicas, PITR | full backup ежедневно, WAL постоянно; daily 7 дней, weekly 8 недель, monthly 12 месяцев |
 | PostgreSQL / core-cluster (обычные таблицы) | primary + 2 async replicas, PITR | full backup ежедневно, WAL постоянно; daily 7 дней, weekly 8 недель, monthly 12 месяцев |
 | PostgreSQL / core-cluster (`bookings`, `payments`, `availability_day`) | primary + **1 синхронная** + 1 async replica, PITR | синхронная реплика гарантирует отсутствие потери данных на критическом пути бронирования |
-| Elasticsearch | 12 primary shards + 1 replica each, snapshot в MinIO | snapshot каждые 6 часов; daily 14 дней, weekly 8 недель; при полной потере — переиндексация из Kafka или PostgreSQL |
-| Redis / session-cluster | 3 masters + 3 replicas, AOF + RDB | AOF everysec + RDB каждые 15 минут; выгрузка в S3 ежедневно; retention 14 дней |
+| Elasticsearch | 12 primary shards + 1 replica each, snapshot в RustFS | snapshot каждые 6 часов; daily 14 дней, weekly 8 недель; при полной потере — переиндексация из Kafka или PostgreSQL |
+| Redis / session-cluster | 3 masters + 3 replicas, AOF + RDB | AOF everysec + RDB каждые 15 минут; выгрузка в RustFS ежедневно; retention 14 дней |
 | Redis / cache-cluster | 6 masters + 6 replicas, RDB | потеря допустима — кэш прогревается из PostgreSQL; RDB ежедневно, retention 3 дня |
 | Kafka | replication factor 3, retention 3 дня | каждое сообщение на 3 брокерах; при полной потере — переиндексация из PostgreSQL |
-| MinIO (S3) | erasure coding + versioning | потеря диска или узла не приводит к потере файлов; версии объектов 30 дней |
+| RustFS (S3) | erasure coding + versioning | потеря диска или узла не приводит к потере файлов; версии объектов 30 дней |
 | NGINX Ingress / API | N+1, 9 нод | при отказе 1 ноды оставшиеся 8 покрывают пиковую нагрузку |
 | NGINX Ingress / Web | N+1, 3 ноды | при отказе 1 ноды оставшиеся 2 покрывают нагрузку |
 | L4 балансировщик | HA обеспечивается облачным провайдером | — |
 | Kubernetes pods | 2–3 реплики на сервис, разные узлы | health-check исключает недоступные поды из балансировки |
-| CDN | edge replication провайдером | при недоступности CDN — раздача напрямую с MinIO origin |
+| CDN | edge replication провайдером | при недоступности CDN — раздача напрямую с RustFS origin |
 
 ## 9.2 Отказоустойчивость
 
@@ -1269,7 +1270,7 @@ CREATE TABLE availability_day (
 | Elasticsearch | поиск недоступен, бронирование работает |
 | Redis cache-cluster | повышенная нагрузка на PostgreSQL, функционал сохраняется |
 | Kafka | обновление поисковой проекции приостанавливается, бронирование работает |
-| CDN | медиа раздаётся напрямую с MinIO origin |
+| CDN | медиа раздаётся напрямую с RustFS origin |
 | Redis session-cluster | пользователи разлогиниваются, повторный вход работает |
 
 ## 9.4 Observability
