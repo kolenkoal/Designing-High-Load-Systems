@@ -1281,6 +1281,170 @@ CREATE TABLE availability_day (
 **Почему Loki, а не ClickHouse для логов:** Loki нативно интегрирован с Grafana — метрики, логи и трейсинг в одном интерфейсе. ClickHouse лучше подходит для аналитических запросов по логам, но требует отдельного UI и сложнее в настройке. Для операционного мониторинга Loki достаточен и значительно легче по ресурсам.
 ---
 
+# 10. Схема проекта
+
+## 10.1 Схема взаимодействия сервисов
+
+```mermaid
+flowchart TB
+    subgraph CLIENT["Клиент"]
+        WEB["React SPA"]
+    end
+
+    subgraph GLOBAL["Глобальный уровень"]
+        DNS["DNS"]
+        CDN["CDN\nimg/static — кэш"]
+        WAF["CDN/WAF"]
+    end
+
+    subgraph LB["Локальная балансировка"]
+        L4["L4 балансировщик\nVirtual Server via NAT"]
+        L7_API["NGINX Ingress\napi.airbnb.com\n9 нод, N+1, SSL termination"]
+        L7_WEB["NGINX Ingress\nwww.airbnb.com\n3 ноды, N+1, SSL termination"]
+    end
+
+    subgraph K8S["Kubernetes кластер / сервисы"]
+        AUTH["Auth Service"]
+        SEARCH["Search Service"]
+        LISTING["Listing Service"]
+        BOOKING["Booking Service"]
+        PAYMENT["Payment Service"]
+        REVIEW["Review Service"]
+        MEDIA["Media Service"]
+    end
+
+    subgraph KAFKA["Kafka / 3 brokers, RF=3"]
+        K1["listing-updates"]
+        K2["availability-updates"]
+        K3["media-events"]
+        ES_IDX["Elasticsearch Indexer"]
+        THUMB["Thumbnail Worker"]
+    end
+
+    subgraph PG_USER["PostgreSQL / user-cluster\n8 shards by HASH(user_id)"]
+        PB_U_W["PgBouncer (write)"]
+        PB_U_R["PgBouncer (read)"]
+        PG_U_P["Primary"]
+        PG_U_R1["Replica 1"]
+        PG_U_R2["Replica 2"]
+    end
+
+    subgraph PG_CORE["PostgreSQL / core-cluster\n16 shards by HASH(listing_id)"]
+        PB_C_W["PgBouncer (write)"]
+        PB_C_R["PgBouncer (read)"]
+        PG_C_P["Primary"]
+        PG_C_R1["Replica 1"]
+        PG_C_R2["Replica 2 (sync для bookings/payments/availability)"]
+    end
+
+    subgraph ES["Elasticsearch 8\n12 shards + 1 replica"]
+        ES_COORD["Координирующая нода (proxy)"]
+        ES_SH["Primary + Replica shards"]
+    end
+
+    subgraph REDIS["Redis 7"]
+        RS["Session cluster\n3 masters + Sentinel"]
+        RC["Cache cluster\n6 masters + Sentinel"]
+    end
+
+    subgraph STORAGE["Объектное хранилище"]
+        RUSTFS["RustFS\nerasure coding + versioning"]
+        CDN2["CDN origin pull"]
+    end
+
+    WEB --> DNS
+    DNS --> WAF
+    WAF -->|"img/static"| CDN
+    WAF -->|"api/www"| L4
+    L4 --> L7_API
+    L4 --> L7_WEB
+    L7_API --> K8S
+    L7_WEB --> K8S
+
+    AUTH --> PB_U_W & PB_U_R
+    SEARCH --> ES_COORD
+    SEARCH --> RC
+    LISTING --> PB_C_W & PB_C_R
+    LISTING --> RC
+    LISTING --> K1
+    BOOKING --> PB_C_W
+    BOOKING --> K2
+    PAYMENT --> PB_C_W
+    REVIEW --> PB_C_W & PB_C_R
+    MEDIA --> PB_C_W
+    MEDIA --> K3
+    MEDIA --> RUSTFS
+
+    PB_U_W --> PG_U_P
+    PB_U_R --> PG_U_R1 & PG_U_R2
+    PB_C_W --> PG_C_P
+    PB_C_R --> PG_C_R1 & PG_C_R2
+
+    K1 --> ES_IDX
+    K2 --> ES_IDX
+    K3 --> THUMB
+    ES_IDX --> ES_COORD
+    THUMB --> RUSTFS
+
+    ES_COORD --> ES_SH
+    RUSTFS --> CDN2
+    CDN2 --> CDN
+
+    AUTH --> RS
+    SEARCH --> RC
+```
+
+## 10.2 Пояснения к схеме
+
+### Внешняя балансировка (входящий трафик)
+
+Пользователь обращается к DNS, который возвращает адрес CDN/WAF — единой точки входа. Дальше трафик разделяется:
+
+- `img.airbnb.com` и `static.airbnb.com` — отдаются напрямую из CDN-кэша, в датацентр не попадают
+- `api.airbnb.com` и `www.airbnb.com` — проксируются в датацентр через **L4-балансировщик** (Virtual Server via NAT), который не делает SSL termination, а просто перенаправляет TCP на пул L7
+
+На **L7 (NGINX Ingress)** происходит SSL termination и маршрутизация по hostname. Две отдельные группы: API (9 нод, N+1) и Web (3 ноды, N+1). Балансировка между репликами сервисов — round-robin, так как все сервисы stateless.
+
+---
+
+### Внутренняя балансировка (межсервисный трафик)
+
+Внутри Kubernetes сервисы общаются через **Kubernetes Service (ClusterIP)**:
+
+- **CoreDNS** резолвит имя сервиса в виртуальный IP
+- **kube-proxy (IPVS)** распределяет трафик между pod-ами по L4
+
+---
+
+### Потоки данных по сценариям
+
+**Поиск жилья:**
+`Search Service → Redis cache-cluster (cache hit?) → Elasticsearch (координирующая нода → shards)`
+
+**Карточка объявления:**
+`Listing Service → Redis cache-cluster (listing_card_cache, включая availability[365]) → при miss: PostgreSQL core-cluster (read replicas)`
+
+**Бронирование:**
+`Booking Service → PostgreSQL core-cluster (write → primary, транзакция с SELECT FOR UPDATE) → Kafka availability-updates → Elasticsearch indexer (обновление unavailable_dates)`
+
+**Загрузка медиа:**
+`Media Service → RustFS → Kafka media-events → Thumbnail Worker → RustFS (превью) → CDN origin pull`
+
+**Авторизация:**
+`Auth Service → Redis session-cluster (Sentinel, AOF) → при miss: PostgreSQL user-cluster`
+
+---
+
+### Асинхронные потоки через Kafka
+
+Kafka развязывает OLTP и поисковый индекс:
+
+| Топик | Продюсер | Потребитель | Эффект |
+|-------|---------|------------|--------|
+| `listing-updates` | Listing Service | Elasticsearch indexer | обновление поисковой проекции |
+| `availability-updates` | Booking Service | Elasticsearch indexer | обновление `unavailable_dates` |
+| `media-events` | Media Service | Thumbnail Worker | генерация превью |
+
 # Список источников
 
 1. Airbnb — онлайн-платформа для поиска и размещения краткосрочной аренды жилья: [https://ru.wikipedia.org/wiki/Airbnb](https://ru.wikipedia.org/wiki/Airbnb)
