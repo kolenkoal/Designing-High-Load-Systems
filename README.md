@@ -940,15 +940,22 @@ flowchart TB
 - роутит **write-запросы** → primary
 - роутит **read-запросы** → read replicas
 
-```
-Приложение → PgBouncer → primary  (write)
-                       → replica  (read)
+```mermaid
+flowchart LR
+    APP[Приложение]
+    APP --> PB_W["PgBouncer (write)"]
+    APP --> PB_R1["PgBouncer (read)"]
+    APP --> PB_R2["PgBouncer (read)"]
+    PB_W --> PRI["Primary (shard N)"]
+    PB_R1 --> REP1["Replica 1 (shard N)"]
+    PB_R2 --> REP2["Replica 2 (shard N)"]
 ```
 
 ### Elasticsearch
 
-- запросы идут через координирующую ноду кластера
-- координатор сам распределяет запрос по нужным shards
+- запросы идут через **координирующую ноду** — это выделенный proxy-узел кластера, который не хранит данные и не является primary/replica шарда
+- координирующая нода принимает запрос, определяет какие shards содержат нужные данные, рассылает подзапросы, собирает и агрегирует результаты
+- приложение всегда обращается только к координирующей ноде — топология кластера скрыта за ней
 
 ### Redis
 
@@ -1207,30 +1214,30 @@ CREATE TABLE availability_day (
 
 # 8. Технологии
 
-| Технология | Применение | Почему именно эта технология |
-|:-----------|:----------:|-----------------------------:|
-| **PostgreSQL 16** | Реляционная база данных | Open-source, ACID, большое количество расширений, широкое комьюнити, поддержка шардирования и партиционирования |
-| **Elasticsearch 8** | Поисковый движок | Open-source, нативная поддержка полнотекстового поиска, геофильтров, горизонтальное шардирование, хранение массивов (`unavailable_dates`) |
-| **Redis 7** | Key-value хранилище | Sub-millisecond latency, open-source, cluster mode, подходит для кэшей и сессий с TTL |
-| **Apache Kafka** | Брокер сообщений | Open-source, высокая пропускная способность, гарантия доставки, партиционирование по `listing_id` |
-| **RustFS** | S3-совместимое объектное хранилище | Open-source, self-hosted, написан на Rust — высокая производительность и безопасность памяти, полностью совместим с S3 API, активно развивается |
-| **Python 3.12** | Язык программирования (backend) | Широкая экосистема async-библиотек, популярность, большое комьюнити |
-| **FastAPI** | Backend фреймворк | Async из коробки, автогенерация OpenAPI, высокая производительность среди Python-фреймворков |
-| **asyncpg** | PostgreSQL драйвер | Самый быстрый async-драйвер для PostgreSQL в Python |
-| **SQLAlchemy 2** | ORM | Поддержка async, гибкость, совместимость с asyncpg |
-| **PgBouncer** | Connection pooler | Transaction pooling — мультиплексирует соединения к PostgreSQL, снижает нагрузку |
+| Технология           | Применение | Почему именно эта технология |
+|:---------------------|:----------:|-----------------------------:|
+| **PostgreSQL 16**    | Реляционная база данных | Open-source, ACID, большое количество расширений, широкое комьюнити, поддержка шардирования и партиционирования |
+| **Elasticsearch 8**  | Поисковый движок | Open-source, нативная поддержка полнотекстового поиска, геофильтров, горизонтальное шардирование, хранение массивов (`unavailable_dates`) |
+| **Redis 7**          | Key-value хранилище | Sub-millisecond latency, open-source, cluster mode, подходит для кэшей и сессий с TTL |
+| **Apache Kafka**     | Брокер сообщений | Open-source, высокая пропускная способность, гарантия доставки, партиционирование по `listing_id` |
+| **RustFS**           | S3-совместимое объектное хранилище | Open-source, self-hosted, написан на Rust — высокая производительность и безопасность памяти, полностью совместим с S3 API, активно развивается |
+| **Python 3.12**      | Язык программирования (backend) | Широкая экосистема async-библиотек, популярность, большое комьюнити |
+| **FastAPI**          | Backend фреймворк | Async из коробки, автогенерация OpenAPI, высокая производительность среди Python-фреймворков |
+| **asyncpg**          | PostgreSQL драйвер | Самый быстрый async-драйвер для PostgreSQL в Python |
+| **SQLAlchemy 2**     | ORM | Поддержка async, гибкость, совместимость с asyncpg |
+| **PgBouncer**        | Connection pooler | Transaction pooling — мультиплексирует соединения к PostgreSQL, снижает нагрузку |
 | **elasticsearch-py** | Elasticsearch клиент | Официальный async-клиент от Elastic |
-| **redis-py** | Redis клиент | Поддержка cluster mode, async API |
-| **aiokafka** | Kafka клиент | Async producer и consumer для Python |
-| **aioboto3** | S3 клиент | Async-обёртка над boto3, совместима с RustFS |
-| **React** | Frontend фреймворк | Популярность, большая экосистема, компонентный подход, SPA |
-| **NGINX Ingress** | Reverse-proxy / L7 балансировщик | SSL termination, маршрутизация по hostname, N+1 резервирование |
-| **Kubernetes** | Оркестрация контейнеров | Service discovery, auto-scaling, health-check, управление репликами |
-| **Prometheus** | Сбор метрик | Pull-архитектура, широкая интеграция с Kubernetes и всеми компонентами стека |
-| **Grafana** | Мониторинг и алертинг | Дашборды поверх Prometheus, alertmanager для инцидентов |
-| **Jaeger** | Distributed tracing | Трейсинг межсервисных запросов, поиск узких мест |
-| **CDN** | Раздача медиаконтента | Снижает нагрузку на origin, ускоряет доставку фото и статики |
-
+| **redis-py**         | Redis клиент | Поддержка cluster mode, async API |
+| **aiokafka**         | Kafka клиент | Async producer и consumer для Python |
+| **aioboto3**         | S3 клиент | Async-обёртка над boto3, совместима с RustFS |
+| **React**            | Frontend фреймворк | Популярность, большая экосистема, компонентный подход, SPA |
+| **NGINX Ingress**    | Reverse-proxy / L7 балансировщик | SSL termination, маршрутизация по hostname, N+1 резервирование |
+| **Kubernetes**       | Оркестрация контейнеров | Service discovery, auto-scaling, health-check, управление репликами |
+| **Victoria Metrics** | Сбор и хранение метрик | Меньше потребляет RAM чем Prometheus, нативная кластеризация, долгосрочное хранение из коробки, совместима с Prometheus API |
+| **Grafana**          | Мониторинг и алертинг | Единый UI для метрик, логов и трейсинга — дашборды и alertmanager || **Jaeger** | Distributed tracing | Трейсинг межсервисных запросов, поиск узких мест |
+| **CDN**              | Раздача медиаконтента | Снижает нагрузку на origin, ускоряет доставку фото и статики |
+| **Redis Sentinel**   | Мониторинг и failover Redis | Автоматическое обнаружение падения master и переключение клиентов на новый master |
+| **Loki**             | Централизованный сбор логов | Не индексирует содержимое — только метки, хранит логи в RustFS, нативная интеграция с Grafana |
 ---
 
 # 9. Обеспечение надёжности
@@ -1243,8 +1250,8 @@ CREATE TABLE availability_day (
 | PostgreSQL / core-cluster (обычные таблицы) | primary + 2 async replicas, PITR | full backup ежедневно, WAL постоянно; daily 7 дней, weekly 8 недель, monthly 12 месяцев |
 | PostgreSQL / core-cluster (`bookings`, `payments`, `availability_day`) | primary + **1 синхронная** + 1 async replica, PITR | синхронная реплика гарантирует отсутствие потери данных на критическом пути бронирования |
 | Elasticsearch | 12 primary shards + 1 replica each, snapshot в RustFS | snapshot каждые 6 часов; daily 14 дней, weekly 8 недель; при полной потере — переиндексация из Kafka или PostgreSQL |
-| Redis / session-cluster | 3 masters + 3 replicas, AOF + RDB | AOF everysec + RDB каждые 15 минут; выгрузка в RustFS ежедневно; retention 14 дней |
-| Redis / cache-cluster | 6 masters + 6 replicas, RDB | потеря допустима — кэш прогревается из PostgreSQL; RDB ежедневно, retention 3 дня |
+| Redis / session-cluster | 3 masters + 3 replicas, AOF + RDB, **Redis Sentinel** | Sentinel следит за доступностью masters и автоматически выполняет failover; AOF everysec + RDB каждые 15 минут; retention 14 дней |
+| Redis / cache-cluster | 6 masters + 6 replicas, RDB, **Redis Sentinel** | Sentinel обеспечивает автоматический failover; потеря кэша допустима — прогревается из PostgreSQL; RDB ежедневно, retention 3 дня |
 | Kafka | replication factor 3, retention 3 дня | каждое сообщение на 3 брокерах; при полной потере — переиндексация из PostgreSQL |
 | RustFS (S3) | erasure coding + versioning | потеря диска или узла не приводит к потере файлов; версии объектов 30 дней |
 | NGINX Ingress / API | N+1, 9 нод | при отказе 1 ноды оставшиеся 8 покрывают пиковую нагрузку |
@@ -1255,33 +1262,23 @@ CREATE TABLE availability_day (
 
 ## 9.2 Отказоустойчивость
 
-- **Автоматический failover** — при падении primary PostgreSQL Patroni переключает на реплику
+- **Автоматический failover** — при падении primary PostgreSQL Patroni переключает на реплику; Redis Sentinel следит за masters и переключает клиентов на новый master
 - **Circuit breaker** — на стороне клиента при межсервисных вызовах, предотвращает каскадные отказы
 - **Retry с экспоненциальной задержкой** — только для идемпотентных операций
 - **Rate limiting** — ограничение числа запросов на уровне NGINX Ingress
-- **Graceful shutdown** — сервисы завершают текущие запросы перед остановкой
 - **`idempotency_key` в `payments`** — защита от дублирования платежей при ретраях
 - **`SELECT FOR UPDATE`** — защита от double booking на критическом пути бронирования
 
-## 9.3 Деградация вместо полного отказа
-
-| Отказавший компонент | Поведение системы |
-|---------------------|------------------|
-| Elasticsearch | поиск недоступен, бронирование работает |
-| Redis cache-cluster | повышенная нагрузка на PostgreSQL, функционал сохраняется |
-| Kafka | обновление поисковой проекции приостанавливается, бронирование работает |
-| CDN | медиа раздаётся напрямую с RustFS origin |
-| Redis session-cluster | пользователи разлогиниваются, повторный вход работает |
-
-## 9.4 Observability
+## 9.3 Observability
 
 | Инструмент | Назначение |
 |-----------|-----------|
-| **Prometheus** | сбор метрик со всех сервисов (pull-модель) |
-| **Grafana** | дашборды и alertmanager для мониторинга инцидентов |
-| **Jaeger** | distributed tracing межсервисных запросов |
-| **Structured logging** | JSON-логи со всех сервисов, централизованный сбор |
+| **Victoria Metrics** | сбор и долгосрочное хранение метрик — потребляет меньше RAM чем Prometheus, нативная кластеризация, совместима с Prometheus API |
+| **Grafana** | единый UI для метрик (Victoria Metrics), логов (Loki) и трейсинга (Jaeger) — дашборды и alertmanager |
+| **Loki** | централизованный сбор и хранение логов — не индексирует содержимое, только метки; хранит логи в RustFS; нативная интеграция с Grafana |
+| **Jaeger** | distributed tracing межсервисных запросов, поиск узких мест |
 
+**Почему Loki, а не ClickHouse для логов:** Loki нативно интегрирован с Grafana — метрики, логи и трейсинг в одном интерфейсе. ClickHouse лучше подходит для аналитических запросов по логам, но требует отдельного UI и сложнее в настройке. Для операционного мониторинга Loki достаточен и значительно легче по ресурсам.
 ---
 
 # Список источников
