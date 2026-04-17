@@ -948,7 +948,6 @@ flowchart LR
     APP --> PB_R2["PgBouncer (read)"]
     PB_W --> PRI["Primary (shard N)"]
     PB_R1 --> REP1["Replica 1 (shard N)"]
-    PB_R2 --> REP2["Replica 2 (shard N)"]
 ```
 
 ### Elasticsearch
