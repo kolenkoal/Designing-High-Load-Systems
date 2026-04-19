@@ -1276,7 +1276,6 @@ CREATE TABLE availability_day (
 | **Loki** | централизованный сбор и хранение логов — не индексирует содержимое, только метки; хранит логи в RustFS; нативная интеграция с Grafana |
 | **Jaeger** | distributed tracing межсервисных запросов, поиск узких мест |
 
-**Почему Loki, а не ClickHouse для логов:** Loki нативно интегрирован с Grafana — метрики, логи и трейсинг в одном интерфейсе. ClickHouse лучше подходит для аналитических запросов по логам, но требует отдельного UI и сложнее в настройке. Для операционного мониторинга Loki достаточен и значительно легче по ресурсам.
 ---
 
 # 10. Схема проекта
@@ -1291,18 +1290,21 @@ flowchart TB
 
     subgraph GLOBAL["Глобальный уровень"]
         DNS["DNS"]
-        CDN["CDN\nimg/static — кэш"]
-        WAF["CDN/WAF"]
+        WAF["CDN/WAF\nединая точка входа"]
+        CDN_CACHE["CDN\nimg / static / www — кэш SPA + медиа\norigin pull → RustFS"]
     end
 
     subgraph LB["Локальная балансировка"]
         L4["L4 балансировщик\nVirtual Server via NAT"]
         L7_API["NGINX Ingress\napi.airbnb.com\n9 нод, N+1, SSL termination"]
-        L7_WEB["NGINX Ingress\nwww.airbnb.com\n3 ноды, N+1, SSL termination"]
     end
 
-    subgraph K8S["Kubernetes кластер / сервисы"]
+    subgraph GW["API Gateway"]
+        APIGW["API Gateway\nJWT validation · rate limiting · routing"]
         AUTH["Auth Service"]
+    end
+
+    subgraph K8S["Kubernetes / сервисы приложения"]
         SEARCH["Search Service"]
         LISTING["Listing Service"]
         BOOKING["Booking Service"]
@@ -1311,15 +1313,18 @@ flowchart TB
         MEDIA["Media Service"]
     end
 
-    subgraph KAFKA["Kafka / 3 brokers, RF=3"]
+    subgraph MQ["Kafka / 3 brokers, RF=3"]
         K1["listing-updates"]
         K2["availability-updates"]
         K3["media-events"]
+    end
+
+    subgraph CONSUMERS["Kafka consumers"]
         ES_IDX["Elasticsearch Indexer"]
         THUMB["Thumbnail Worker"]
     end
 
-    subgraph PG_USER["PostgreSQL / user-cluster\n8 shards by HASH(user_id)"]
+    subgraph PG_USER["PostgreSQL / user-cluster\n8 shards · HASH(user_id)"]
         PB_U_W["PgBouncer (write)"]
         PB_U_R["PgBouncer (read)"]
         PG_U_P["Primary"]
@@ -1327,12 +1332,12 @@ flowchart TB
         PG_U_R2["Replica 2"]
     end
 
-    subgraph PG_CORE["PostgreSQL / core-cluster\n16 shards by HASH(listing_id)"]
+    subgraph PG_CORE["PostgreSQL / core-cluster\n16 shards · HASH(listing_id)"]
         PB_C_W["PgBouncer (write)"]
         PB_C_R["PgBouncer (read)"]
         PG_C_P["Primary"]
         PG_C_R1["Replica 1"]
-        PG_C_R2["Replica 2 (sync для bookings/payments/availability)"]
+        PG_C_R2["Replica 2 (sync)"]
     end
 
     subgraph ES["Elasticsearch 8\n12 shards + 1 replica"]
@@ -1347,22 +1352,27 @@ flowchart TB
 
     subgraph STORAGE["Объектное хранилище"]
         RUSTFS["RustFS\nerasure coding + versioning"]
-        CDN2["CDN origin pull"]
     end
 
     WEB --> DNS
     DNS --> WAF
-    WAF -->|"img/static"| CDN
-    WAF -->|"api/www"| L4
+    WAF -->|"img / static / www"| CDN_CACHE
+    CDN_CACHE -->|"origin pull"| RUSTFS
+    WAF -->|"api.airbnb.com"| L4
     L4 --> L7_API
-    L4 --> L7_WEB
-    L7_API --> K8S
-    L7_WEB --> K8S
+    L7_API --> APIGW
 
-    AUTH --> PB_U_W & PB_U_R
+    APIGW -->|"проверка JWT"| AUTH
+    AUTH --> RS
+    AUTH -->|"при miss"| PB_U_W & PB_U_R
+    PB_U_W --> PG_U_P
+    PB_U_R --> PG_U_R1 & PG_U_R2
+
+    APIGW --> SEARCH & LISTING & BOOKING & PAYMENT & REVIEW & MEDIA
+
     SEARCH --> ES_COORD
     SEARCH --> RC
-    LISTING --> PB_C_W & PB_C_R
+    LISTING --> PB_C_R & PB_C_W
     LISTING --> RC
     LISTING --> K1
     BOOKING --> PB_C_W
@@ -1373,35 +1383,46 @@ flowchart TB
     MEDIA --> K3
     MEDIA --> RUSTFS
 
-    PB_U_W --> PG_U_P
-    PB_U_R --> PG_U_R1 & PG_U_R2
     PB_C_W --> PG_C_P
     PB_C_R --> PG_C_R1 & PG_C_R2
 
-    K1 --> ES_IDX
-    K2 --> ES_IDX
-    K3 --> THUMB
+    K1 -->|"consume"| ES_IDX
+    K2 -->|"consume"| ES_IDX
+    K3 -->|"consume"| THUMB
     ES_IDX --> ES_COORD
     THUMB --> RUSTFS
 
     ES_COORD --> ES_SH
-    RUSTFS --> CDN2
-    CDN2 --> CDN
-
-    AUTH --> RS
-    SEARCH --> RC
 ```
 
 ## 10.2 Пояснения к схеме
 
 ### Внешняя балансировка (входящий трафик)
 
-Пользователь обращается к DNS, который возвращает адрес CDN/WAF — единой точки входа. Дальше трафик разделяется:
+Пользователь обращается к DNS, который возвращает адрес CDN/WAF — единой точки входа. Дальше трафик разделяется по типу:
 
-- `img.airbnb.com` и `static.airbnb.com` — отдаются напрямую из CDN-кэша, в датацентр не попадают
-- `api.airbnb.com` и `www.airbnb.com` — проксируются в датацентр через **L4-балансировщик** (Virtual Server via NAT), который не делает SSL termination, а просто перенаправляет TCP на пул L7
+- `img.airbnb.com`, `static.airbnb.com`, **`www.airbnb.com`** — обслуживаются **напрямую из CDN**. SPA-бандл (JS/CSS/HTML) хранится в RustFS и раздаётся через CDN без участия L7-ингресса: первый запрос — origin pull из RustFS, последующие — из CDN-кэша. Отдельный L7-ингресс для `www.airbnb.com` при наличии CDN избыточен.
+- `api.airbnb.com` — API-запросы проксируются в датацентр через **L4-балансировщик** (Virtual Server via NAT) → **L7 NGINX Ingress** (9 нод, N+1, SSL termination).
 
-На **L7 (NGINX Ingress)** происходит SSL termination и маршрутизация по hostname. Две отдельные группы: API (9 нод, N+1) и Web (3 ноды, N+1). Балансировка между репликами сервисов — round-robin, так как все сервисы stateless.
+---
+
+### API Gateway и авторизация
+
+Между L7-ингрессом и сервисами приложения стоит **API Gateway**, который централизованно решает три задачи:
+
+| Функция | Описание |
+|---------|---------|
+| **JWT validation** | Для каждого входящего запроса вызывает **Auth Service**, который проверяет токен: сначала смотрит в Redis session-cluster (sub-millisecond), при miss — в PostgreSQL user-cluster (cold path) |
+| **Rate limiting** | Ограничение числа запросов на уровне IP / токена до достижения сервисов приложения |
+| **Routing** | Маршрутизация запроса в нужный downstream-сервис по URI-префиксу |
+
+Поток авторизации:
+```
+Клиент → NGINX Ingress → API Gateway → Auth Service → Redis session-cluster
+                                                     ↘ (при miss) PostgreSQL user-cluster
+```
+
+После успешной проверки API Gateway добавляет заголовок `X-User-Id` и проксирует запрос в целевой сервис.
 
 ---
 
@@ -1410,38 +1431,216 @@ flowchart TB
 Внутри Kubernetes сервисы общаются через **Kubernetes Service (ClusterIP)**:
 
 - **CoreDNS** резолвит имя сервиса в виртуальный IP
-- **kube-proxy (IPVS)** распределяет трафик между pod-ами по L4
+- **kube-proxy (IPVS)** распределяет трафик между pod-ами по L4 (round-robin)
 
 ---
 
-### Потоки данных по сценариям
+### Kafka consumers (асинхронный слой)
+
+Kafka развязывает OLTP и фоновую обработку. Consumers вынесены в отдельный слой и читают топики независимо от сервисов-продюсеров:
+
+| Топик | Продюсер | Consumer | Эффект |
+|-------|---------|---------|--------|
+| `listing-updates` | Listing Service | **Elasticsearch Indexer** | обновление поисковой проекции `listing_search` |
+| `availability-updates` | Booking Service | **Elasticsearch Indexer** | обновление `unavailable_dates` после бронирования |
+| `media-events` | Media Service | **Thumbnail Worker** | генерация превью → RustFS |
+
+Оба consumer-а (ES Indexer и Thumbnail Worker) работают как отдельные Deployment в Kubernetes, масштабируются независимо от продюсеров.
+
+---
+
+### Потоки данных по ключевым сценариям
 
 **Поиск жилья:**
-`Search Service → Redis cache-cluster (cache hit?) → Elasticsearch (координирующая нода → shards)`
+`API Gateway → Search Service → Redis cache-cluster (cache hit?) → Elasticsearch (координирующая нода → shards)`
 
-**Карточка объявления:**
-`Listing Service → Redis cache-cluster (listing_card_cache, включая availability[365]) → при miss: PostgreSQL core-cluster (read replicas)`
+**Карточка объявления + доступность:**
+`API Gateway → Listing Service → Redis cache-cluster (listing_card_cache, availability[365]) → при miss: PostgreSQL core-cluster (read replicas)`
 
 **Бронирование:**
-`Booking Service → PostgreSQL core-cluster (write → primary, транзакция с SELECT FOR UPDATE) → Kafka availability-updates → Elasticsearch indexer (обновление unavailable_dates)`
+`API Gateway → Booking Service → PostgreSQL core-cluster (write → primary, SELECT FOR UPDATE) → Kafka availability-updates → Elasticsearch Indexer (обновление unavailable_dates)`
 
 **Загрузка медиа:**
-`Media Service → RustFS → Kafka media-events → Thumbnail Worker → RustFS (превью) → CDN origin pull`
+`API Gateway → Media Service → RustFS → Kafka media-events → Thumbnail Worker → RustFS (превью) → CDN origin pull`
 
-**Авторизация:**
-`Auth Service → Redis session-cluster (Sentinel, AOF) → при miss: PostgreSQL user-cluster`
+**Авторизация (cold path):**
+`API Gateway → Auth Service → Redis session-cluster (miss) → PostgreSQL user-cluster → сессия кэшируется в Redis`
 
 ---
 
-### Асинхронные потоки через Kafka
+# 11. Список серверов
 
-Kafka развязывает OLTP и поисковый индекс:
+Система развёрнута в Kubernetes. Stateless-сервисы приложения запускаются как контейнеры (Deployment + HPA), stateful-компоненты (PostgreSQL, Elasticsearch, Redis, Kafka, RustFS) — на выделенных серверах вне кластера. L7-балансировщики NGINX Ingress также вынесены на отдельные серверы.
 
-| Топик | Продюсер | Потребитель | Эффект |
-|-------|---------|------------|--------|
-| `listing-updates` | Listing Service | Elasticsearch indexer | обновление поисковой проекции |
-| `availability-updates` | Booking Service | Elasticsearch indexer | обновление `unavailable_dates` |
-| `media-events` | Media Service | Thumbnail Worker | генерация превью |
+## 11.1 L7-балансировщики NGINX Ingress
+
+Вне Kubernetes. SSL termination, маршрутизация по hostname, N+1 резервирование. Расчёт — из раздела 4.3.
+
+| Группа | Роль | Кол-во серверов | vCPU | RAM | Диск | Сеть |
+|--------|------|-----------------|------|-----|------|------|
+| `api.airbnb.com` | NGINX Ingress (L7, SSL termination) | **9** | 8 | 16 ГБ | 100 ГБ SSD | 10 Гбит/с |
+| `www.airbnb.com` | NGINX Ingress (L7, SSL termination) | **3** | 4 | 8 ГБ | 100 ГБ SSD | 10 Гбит/с |
+
+> N_work + 1 резервная нода в каждой группе — при отказе одного узла оставшиеся полностью покрывают пиковую нагрузку.
+
+**Итого: 12 серверов.**
+
+## 11.2 Kubernetes кластер
+
+### 11.2.1 Node pools
+
+| Pool | Назначение | Кол-во нод | vCPU/нода | RAM/нода | Диск/нода |
+|------|-----------|-----------|----------|---------|----------|
+| `app-pool` | Сервисы приложения + worker'ы | **7** | 16 | 32 ГБ | 100 ГБ SSD |
+| `db-proxy-pool` | PgBouncer (connection pooling) | **4** | 8 | 16 ГБ | 50 ГБ SSD |
+| `monitoring-pool` | Victoria Metrics, Grafana, Loki, Jaeger | **4** | 8 | 32 ГБ | 1 ТБ SSD |
+
+**Итого: 15 нод Kubernetes.**
+
+Обоснование размера `app-pool`: суммарный CPU limit всех контейнеров (таблица 11.2.2) — 89 vCPU. При профиле 16 vCPU на ноду: ⌈89/16⌉ = 6 рабочих нод + 1 резервная = **7 нод**.
+
+### 11.2.2 Контейнеры приложения (`app-pool`)
+
+Пиковый RPS из раздела 2.2.3. Производительность FastAPI (async I/O) принята ≈ 500 RPS/vCPU (консервативная оценка для сервисов, ожидающих ответа от БД/кэша).
+
+| Сервис | Реплики | CPU request | CPU limit | RAM request | RAM limit | Обоснование реплик |
+|--------|---------|------------|----------|------------|----------|-------------------|
+| `search-service` | **14** | 500m | 1000m | 512 Mi | 1 Gi | 6 945 пик RPS ÷ 500 = 14 vCPU |
+| `listing-service` | **13** | 1000m | 2000m | 512 Mi | 1 Gi | (6 075 + 6 075) пик RPS ÷ 1000 = 12, +1 = 13 |
+| `auth-service` | **4** | 500m | 1000m | 256 Mi | 512 Mi | 1 734 пик RPS ÷ 500 = 4 |
+| `booking-service` | **3** | 500m | 1000m | 256 Mi | 512 Mi | 47 RPS — минимум 3 для отказоустойчивости |
+| `payment-service` | **3** | 500m | 1000m | 256 Mi | 512 Mi | 47 RPS — критический путь, минимум 3 |
+| `review-service` | **2** | 500m | 1000m | 256 Mi | 512 Mi | 17 RPS, минимум 2 |
+| `media-service` | **5** | 1000m | 2000m | 512 Mi | 1 Gi | async загрузка файлов в RustFS |
+| `es-indexer` | **3** | 500m | 1000m | 256 Mi | 512 Mi | Kafka consumer: 3 параллельных потока |
+| `thumbnail-worker` | **3** | 1000m | 2000m | 512 Mi | 1 Gi | Kafka consumer: обработка изображений |
+
+**Суммарно (лимиты):** 14×1 + 13×2 + 4×1 + 3×1 + 3×1 + 2×1 + 5×2 + 3×1 + 3×2 = **89 vCPU**, ~24 ГБ RAM limit.
+
+### 11.2.3 Контейнеры PgBouncer (`db-proxy-pool`)
+
+По одному write- и read-инстансу на каждый шард. Transaction pooling — мультиплексирует клиентские соединения приложения в меньшее число backend-соединений к PostgreSQL.
+
+| Контейнер | Инстансов | CPU request | CPU limit | RAM request | RAM limit | Назначение |
+|-----------|----------|------------|----------|------------|----------|-----------|
+| `pgbouncer-user-write` | **8** | 250m | 500m | 128 Mi | 256 Mi | write → primary, user-cluster (1 на шард) |
+| `pgbouncer-user-read` | **8** | 250m | 500m | 128 Mi | 256 Mi | read → replicas, user-cluster (1 на шард) |
+| `pgbouncer-core-write` | **16** | 250m | 500m | 128 Mi | 256 Mi | write → primary, core-cluster (1 на шард) |
+| `pgbouncer-core-read` | **16** | 250m | 500m | 128 Mi | 256 Mi | read → replicas, core-cluster (1 на шард) |
+
+**Итого: 48 экземпляров PgBouncer.** Суммарные лимиты: 24 vCPU, 12 ГБ RAM.
+
+### 11.2.4 Контейнеры мониторинга (`monitoring-pool`)
+
+| Контейнер | Реплики | CPU request | CPU limit | RAM request | RAM limit | Назначение |
+|-----------|---------|------------|----------|------------|----------|-----------|
+| `victoria-metrics` | **2** | 2000m | 4000m | 8 Gi | 16 Gi | Сбор и хранение метрик (совместимо с Prometheus API) |
+| `grafana` | **2** | 500m | 1000m | 512 Mi | 1 Gi | Дашборды: метрики + логи + трейсы |
+| `loki` | **2** | 1000m | 2000m | 2 Gi | 4 Gi | Хранение логов в RustFS; индексация по меткам |
+| `jaeger` | **2** | 500m | 1000m | 1 Gi | 2 Gi | Distributed tracing межсервисных вызовов |
+
+
+## 11.3 PostgreSQL — user-cluster
+
+8 шардов, шардирование по `HASH(user_id)`. Данные на шард ≈ 54 ГБ (раздел 6.9). RAM выбран так, чтобы `shared_buffers` (25% RAM) покрывал рабочий набор (~10 ГБ/шард).
+
+| Роль | Кол-во серверов | vCPU | RAM | Диск | Примечание |
+|------|-----------------|------|-----|------|-----------|
+| Primary (шарды 1–8) | **8** | 8 | 64 ГБ | 200 ГБ NVMe SSD | write + read |
+| Replica async 1 (шарды 1–8) | **8** | 8 | 64 ГБ | 200 ГБ NVMe SSD | read offload |
+| Replica async 2 (шарды 1–8) | **8** | 8 | 64 ГБ | 200 ГБ NVMe SSD | read offload + PITR |
+
+**Итого: 24 сервера.** Failover управляется Patroni.
+
+
+## 11.4 PostgreSQL — core-cluster
+
+16 шардов, шардирование по `HASH(listing_id)`. Данные на шард ≈ 140 ГБ (раздел 6.9). Для `bookings`, `payments`, `availability_day` — одна синхронная реплика на шард (strong consistency на критическом пути бронирования).
+
+| Роль | Кол-во серверов | vCPU | RAM | Диск | Примечание |
+|------|-----------------|------|-----|------|-----------|
+| Primary (шарды 1–16) | **16** | 16 | 64 ГБ | 500 ГБ NVMe SSD | write + read; `availability_day` partitioned by month |
+| Replica sync (шарды 1–16) | **16** | 16 | 64 ГБ | 500 ГБ NVMe SSD | синхронная реплика для `bookings`/`payments`/`availability_day` |
+| Replica async (шарды 1–16) | **16** | 16 | 64 ГБ | 500 ГБ NVMe SSD | read offload + PITR |
+
+**Итого: 48 серверов.** Failover управляется Patroni.
+
+## 11.5 Elasticsearch
+
+Индекс `listing_search`: 12 primary shards + 1 replica = 24 шарда суммарно. Общий размер индекса ≈ 2 ГБ (раздел 6.3) — целиком помещается в RAM. Узлы совмещают роли data + master-eligible (quorum из 3).
+
+| Роль | Кол-во серверов | vCPU | RAM | Диск | Примечание |
+|------|-----------------|------|-----|------|-----------|
+| Data + Master-eligible | **3** | 8 | 16 ГБ | 100 ГБ SSD | 4 primary + 4 replica shard на узел; heap 8 ГБ |
+| Coordinating (proxy) | **1** | 4 | 8 ГБ | 50 ГБ SSD | Принимает запросы от приложения, не хранит данные |
+
+**Итого: 4 сервера.** Snapshots в RustFS каждые 6 часов.
+
+## 11.6 Redis — session-cluster
+
+Хранит `session:{session_id}`, TTL 30 дней. Hot set ≈ 10 ГБ (раздел 6.5). Redis Sentinel обеспечивает автоматический failover.
+
+| Роль | Кол-во серверов | vCPU | RAM | Диск | Примечание |
+|------|-----------------|------|-----|------|-----------|
+| Master (3 master-ноды) | **3** | 2 | 8 ГБ | 50 ГБ SSD | AOF everysec + RDB каждые 15 мин |
+| Replica (3 replica-ноды) | **3** | 2 | 8 ГБ | 50 ГБ SSD | 1 реплика на каждый master |
+
+**Итого: 6 серверов** + Redis Sentinel (3 инстанса Sentinel, деплой как DaemonSet в K8s).
+
+## 11.7 Redis — cache-cluster
+
+Хранит `listing_card:{listing_id}` с массивом доступности на 365 дней, ~7 КБ/запись. Hot set ≈ 7 ГБ (раздел 6.5). TTL 5 минут, потеря допустима.
+
+| Роль | Кол-во серверов | vCPU | RAM | Диск | Примечание |
+|------|-----------------|------|-----|------|-----------|
+| Master (6 master-нод) | **6** | 2 | 4 ГБ | 20 ГБ SSD | Hot set ≈ 1.2 ГБ/master; RDB ежедневно |
+| Replica (6 replica-нод) | **6** | 2 | 4 ГБ | 20 ГБ SSD | 1 реплика на каждый master |
+
+**Итого: 12 серверов** + Redis Sentinel (3 инстанса в K8s).
+
+## 11.8 Apache Kafka
+
+3 топика: `listing-updates`, `availability-updates`, `media-events`. Retention 3 дня. Пиковый объём сообщений: ~100 msg/с (бронирования ~47/с + обновления листингов ~5/с + медиа-события ~50/с). Нагрузка небольшая.
+
+| Роль | Кол-во серверов | vCPU | RAM | Диск | Примечание |
+|------|-----------------|------|-----|------|-----------|
+| Broker | **3** | 4 | 16 ГБ | 200 ГБ SSD | Replication factor 3; каждое сообщение на всех 3 брокерах |
+
+**Итого: 3 сервера.**
+
+## 11.9 RustFS (S3-совместимое объектное хранилище)
+
+Медиаконтент: фото объявлений (оригиналы + превью), аватары, snapshot'ы Elasticsearch, архивы WAL PostgreSQL. Общий объём ≈ 92 ТБ медиа (раздел 2.2.1).
+
+Схема erasure coding: 8 data + 4 parity (EC 8+4). Накладные расходы: 4/12 = 33%. Эффективная ёмкость = raw ÷ 1.5.
+
+| Роль | Кол-во серверов | vCPU | RAM | Диск | Эфф. ёмкость |
+|------|-----------------|------|-----|------|-------------|
+| Storage node | **12** | 4 | 16 ГБ | 4 × 4 ТБ HDD (16 ТБ raw) | 192 ТБ raw → **128 ТБ** эффективных |
+
+> 128 ТБ эффективных > 92 ТБ медиа + ~5 ТБ snapshots/WAL — запас достаточен.
+
+**Итого: 12 серверов.**
+
+## 11.10 Итоговая сводная таблица серверов
+
+| Компонент | Серверов / нод | vCPU/сервер | RAM/сервер | Диск/сервер | Итого vCPU | Итого RAM |
+|-----------|---------------|------------|-----------|------------|-----------|----------|
+| L7 NGINX Ingress (api) | 9 | 8 | 16 ГБ | 100 ГБ SSD | 72 | 144 ГБ |
+| L7 NGINX Ingress (web) | 3 | 4 | 8 ГБ | 100 ГБ SSD | 12 | 24 ГБ |
+| Kubernetes `app-pool` | 7 | 16 | 32 ГБ | 100 ГБ SSD | 112 | 224 ГБ |
+| Kubernetes `db-proxy-pool` | 4 | 8 | 16 ГБ | 50 ГБ SSD | 32 | 64 ГБ |
+| Kubernetes `monitoring-pool` | 4 | 8 | 32 ГБ | 1 ТБ SSD | 32 | 128 ГБ |
+| PostgreSQL user-cluster | 24 | 8 | 64 ГБ | 200 ГБ NVMe | 192 | 1 536 ГБ |
+| PostgreSQL core-cluster | 48 | 16 | 64 ГБ | 500 ГБ NVMe | 768 | 3 072 ГБ |
+| Elasticsearch | 4 | 4–8 | 8–16 ГБ | 50–100 ГБ SSD | 28 | 56 ГБ |
+| Redis session-cluster | 6 | 2 | 8 ГБ | 50 ГБ SSD | 12 | 48 ГБ |
+| Redis cache-cluster | 12 | 2 | 4 ГБ | 20 ГБ SSD | 24 | 48 ГБ |
+| Kafka | 3 | 4 | 16 ГБ | 200 ГБ SSD | 12 | 48 ГБ |
+| RustFS | 12 | 4 | 16 ГБ | 16 ТБ HDD | 48 | 192 ГБ |
+| **Итого** | **136** | — | — | — | **1 344** | **5 584 ГБ** |
+
+> L4-балансировщик (облачный managed) в таблицу не включён — HA обеспечивается провайдером без выделения собственных серверов.
 
 # Список источников
 
