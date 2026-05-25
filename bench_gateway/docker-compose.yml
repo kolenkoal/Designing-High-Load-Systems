@@ -1,0 +1,40 @@
+services:
+  mock-auth:
+    build: .
+    container_name: bench-mock-auth
+    cpuset: "0"
+    command: uvicorn mock_auth:app --host 0.0.0.0 --port 8001 --workers 1 --no-access-log
+    ports:
+      - "8001:8001"
+    networks:
+      - benchnet
+
+  mock-downstream:
+    build: .
+    container_name: bench-mock-downstream
+    cpuset: "1"
+    command: uvicorn mock_downstream:app --host 0.0.0.0 --port 8002 --workers 1 --no-access-log
+    ports:
+      - "8002:8002"
+    networks:
+      - benchnet
+
+  gateway:
+    build: .
+    container_name: bench-gateway
+    cpuset: "2"
+    command: uvicorn gateway:app --host 0.0.0.0 --port 8000 --workers 1 --no-access-log
+    environment:
+      AUTH_URL: http://mock-auth:8001/auth
+      DOWNSTREAM_URL: http://mock-downstream:8002/api/ping
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mock-auth
+      - mock-downstream
+    networks:
+      - benchnet
+
+networks:
+  benchnet:
+    driver: bridge
